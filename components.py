@@ -1,11 +1,13 @@
-import tree_sitter
-import subprocess
 import json
-from typing import Optional, Dict, Any, List, Tuple
-import urllib.request
-from urllib.error import URLError
 import os
-from core import State, EngineContext
+import subprocess
+import urllib.request
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.error import URLError
+
+import tree_sitter
+
+from core import EngineContext, State
 
 
 class TreeSitterSensor:
@@ -194,8 +196,9 @@ class ECUPromptCompiler:
 class LLMProvider:
     """A lightweight, zero-dependency wrapper for llama.cpp server."""
 
-    def __init__(self, base_url="http://localhost:8080/v1"):
+    def __init__(self, base_url="http://localhost:8080/v1", verbose: bool = False):
         self.base_url = base_url
+        self.verbose = verbose
 
     def generate(self, system_prompt: str, user_prompt: str) -> str:
         import time
@@ -219,14 +222,21 @@ class LLMProvider:
         )
 
         try:
-            print(f"[LLM] Sending request to {self.base_url}/chat/completions...")
+            if self.verbose:
+                print(f"[LLM] Sending request to {self.base_url}/chat/completions...")
             req_start = time.time()
-            with urllib.request.urlopen(req, timeout=30) as response:  # Reduced timeout
+            with urllib.request.urlopen(
+                req, timeout=60
+            ) as response:  # Increased timeout for SEARCH
                 req_end = time.time()
-                print(f"[LLM] Request took {req_end - req_start:.2f} seconds")
+                if self.verbose:
+                    print(f"[LLM] Request took {req_end - req_start:.2f} seconds")
 
                 result = json.loads(response.read().decode("utf-8"))
                 raw_code = result["choices"][0]["message"]["content"].strip()
+
+                if self.verbose:
+                    print(f"[LLM] RAW RESPONSE:\n{raw_code}")
 
                 # Safety Net: Strip markdown blocks if the model hallucinates them
                 if raw_code.startswith("```"):
@@ -235,22 +245,25 @@ class LLMProvider:
                     raw_code = "\n".join(raw_code.split("\n")[:-1])
 
                 end_time = time.time()
-                print(
-                    f"[LLM] Total generation took {end_time - start_time:.2f} seconds"
-                )
+                if self.verbose:
+                    print(
+                        f"[LLM] Total generation took {end_time - start_time:.2f} seconds"
+                    )
                 return raw_code.strip()
 
         except URLError as e:
             end_time = time.time()
-            print(
-                f"[LLM] Connection Error after {end_time - start_time:.2f} seconds: {e}"
-            )
+            if self.verbose:
+                print(
+                    f"[LLM] Connection Error after {end_time - start_time:.2f} seconds: {e}"
+                )
             return None
         except Exception as e:
             end_time = time.time()
-            print(
-                f"[LLM] Unexpected Error after {end_time - start_time:.2f} seconds: {e}"
-            )
+            if self.verbose:
+                print(
+                    f"[LLM] Unexpected Error after {end_time - start_time:.2f} seconds: {e}"
+                )
             return None
 
 
@@ -283,3 +296,85 @@ class CodingState(State):
         context.data["llm_payload"] = response
 
         return "SYNTAX_GATE"
+
+
+class SearchState(State):
+    """
+    Determines if the implementation already exists or where to edit.
+    """
+
+    def __init__(self, verbose: bool = True):
+        super().__init__(name="SEARCH")
+        self.llm = LLMProvider(base_url="http://localhost:8080/v1", verbose=verbose)
+
+    def execute(self, context: EngineContext) -> str:
+        filepath = context.data.get("filepath")
+        intent = context.data.get("user_intent")
+        language = context.data.get("language")
+
+        if not filepath or not intent:
+            context.data["errors"].append("Missing filepath or intent for SEARCH.")
+            return "IDLE"
+
+        # Read the entire file content
+        try:
+            with open(filepath, "rb") as f:
+                source_code = f.read().decode("utf8")
+        except Exception as e:
+            context.data["errors"].append(f"Failed to read file {filepath}: {e}")
+            return "IDLE"
+
+        # If the file is empty, we definitely need to implement
+        if not source_code.strip():
+            context.data["target_name"] = ""  # Will need to be handled differently
+            return "SENSE"
+
+        system_prompt = (
+            f"You are an expert {language} developer. Your task is to determine if the user's intent "
+            f"is already satisfied by the provided code. If the implementation already exists and fully "
+            f"meets the intent, respond with the exact string 'EXISTS' (no quotes). "
+            f"If the implementation does not exist or is incomplete, respond with the name of the function "
+            f"or item that needs to be created or modified to fulfill the intent. "
+            f"Respond with ONLY that string, no extra text, no markdown, no explanation."
+        )
+        user_prompt = (
+            f"User Intent:\n{intent}\n\n"
+            f"Full File Content ({filepath}):\n{source_code}\n\n"
+            f"Does the implementation already exist? If yes, output EXISTS. If no, output the name of the function/item to edit/create."
+        )
+
+        print(f"[{self.name}] Querying LLM to check if implementation exists...")
+        response = self.llm.generate(system_prompt, user_prompt)
+
+        if not response:
+            context.data["errors"].append("LLM generation failed in SEARCH state.")
+            return "IDLE"
+
+        response = response.strip()
+        print(f"[{self.name}] LLM raw response: '{response}'")
+
+        if response.upper() == "EXISTS":
+            print(
+                f"[{self.name}] Implementation already exists. Skipping coding phase."
+            )
+            context.data["skip_coding"] = True
+            return "IDLE"
+        else:
+            # Assume the response is the target name (e.g., function name)
+            target_name = response
+            # Basic sanitization: take first line, strip whitespace
+            target_name = target_name.split("\n")[0].strip()
+            if not target_name:
+                context.data["errors"].append("LLM did not return a valid target name.")
+                return "IDLE"
+            context.data["target_name"] = target_name
+            # Construct a default Tree-sitter query for a function item with this name.
+            # This assumes the target is a function; we could make this more dynamic later.
+            context.data["target_func"] = f"""
+            (function_item
+                name: (identifier) @func_name
+                (#eq? @func_name "{target_name}")
+            ) @function
+            """
+            print(f"[{self.name}] Target set to '{target_name}'. Proceeding to SENSE.")
+            return "SENSE"

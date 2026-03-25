@@ -3,6 +3,7 @@ from components import (
     DriveByWireActuator,
     ECUPromptCompiler,
     LLMProvider,
+    SearchState,
     SyntaxGate,
     TreeSitterSensor,
 )
@@ -103,12 +104,8 @@ def main():
     # 1. Initialize the shared memory bus
     context = EngineContext()
     context.data["filepath"] = "test.rs"
-    context.data["target_func"] = """
-    (function_item
-        name: (identifier) @func_name
-        (#eq? @func_name "take_damage")
-    ) @function
-    """
+    # Placeholder for target_func; will be set by SEARCH state if needed.
+    context.data["target_func"] = ""
     # Give the LLM its marching orders
     context.data["user_intent"] = """
     Rewrite take_damage to implement armor mitigation and a death state:
@@ -125,6 +122,7 @@ def main():
     import tree_sitter_rust
 
     states_registry = {
+        "SEARCH": SearchState(verbose=True),
         "SENSE": SenseState(tree_sitter_rust.language()),
         "CODING": CodingState(),
         "SYNTAX_GATE": SyntaxGateState(tree_sitter_rust.language()),
@@ -132,7 +130,7 @@ def main():
     }
 
     # 3. Start the ignition
-    current_state_name = "SENSE"
+    current_state_name = "SEARCH"
 
     # 4. The main Engine Loop with benchmarking
     import time
