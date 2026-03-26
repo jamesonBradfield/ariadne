@@ -241,6 +241,15 @@ class LLMProvider:
         try:
             if self.verbose:
                 print(f"[LLM] Sending request to {self.base_url}/chat/completions...")
+                print(f"[LLM] === FULL SYSTEM PROMPT ({len(system_prompt)} chars) ===")
+                print(system_prompt)
+                print(f"[LLM] === END SYSTEM PROMPT ===")
+                print(f"[LLM] === FULL USER PROMPT ({len(user_prompt)} chars) ===")
+                print(user_prompt)
+                print(f"[LLM] === END USER PROMPT ===")
+                print(
+                    f"[LLM] max_tokens={max_tokens}, stop={stop_sequences}, disable_thinking={disable_thinking}"
+                )
             req_start = time.time()
             with urllib.request.urlopen(req, timeout=60) as response:
                 req_end = time.time()
@@ -251,7 +260,9 @@ class LLMProvider:
                 raw_code = result["choices"][0]["message"]["content"].strip()
 
                 if self.verbose:
-                    print(f"[LLM] RAW RESPONSE:\n{raw_code}")
+                    print(f"[LLM] === RAW RESPONSE ({len(raw_code)} chars) ===")
+                    print(raw_code)
+                    print(f"[LLM] === END RAW RESPONSE ===")
 
                 # Strip thinking tags from Qwen3 responses (including partial tags when stopped mid-generation)
                 import re
