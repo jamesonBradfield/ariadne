@@ -28,6 +28,12 @@ class RustProfile(LanguageProfile):
             f'(function_item name: (identifier) @func_name (#eq? @func_name "{symbol_name}")) @function'
         )
 
+    def get_skeleton_query(self) -> str:
+        """
+        Return the query to find function bodies to strip for skeletonization.
+        """
+        return "(function_item body: (block) @body) @func"
+
     def parse_search_result(self, response: str) -> Optional[str]:
         """
         Parse the LLM's raw response to extract the function/item name.

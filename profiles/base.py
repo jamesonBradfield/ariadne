@@ -31,6 +31,11 @@ class LanguageProfile(ABC):
         pass
 
     @abstractmethod
+    def get_skeleton_query(self) -> str:
+        """Return the Tree-sitter query string to find bodies to strip for skeletonization."""
+        pass
+
+    @abstractmethod
     def parse_search_result(self, response: str) -> Optional[str]:
         """
         Parse the LLM's raw response from the SEARCH state to extract

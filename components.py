@@ -322,6 +322,47 @@ class CodingState(State):
         return "SYNTAX_GATE"
 
 
+class Skeletonizer:
+    """
+    A pure Python skeletonizer that uses tree-sitter to strip function bodies.
+    """
+
+    @staticmethod
+    def skeletonize(filepath: str, profile: Any) -> Optional[str]:
+        try:
+            with open(filepath, "rb") as f:
+                source_code = f.read()
+
+            language = tree_sitter.Language(profile.get_language_ptr())
+            parser = tree_sitter.Parser(language)
+            tree = parser.parse(source_code)
+            
+            query = tree_sitter.Query(language, profile.get_skeleton_query())
+            query_cursor = tree_sitter.QueryCursor(query)
+            captures = query_cursor.captures(tree.root_node)
+
+            # We want to replace the 'body' capture of each function
+            body_spans = []
+            if "body" in captures:
+                for node in captures["body"]:
+                    body_spans.append((node.start_byte, node.end_byte))
+
+            if not body_spans:
+                return source_code.decode("utf8")
+
+            # Sort spans in reverse order to replace without shifting offsets
+            body_spans.sort(key=lambda x: x[0], reverse=True)
+
+            result = bytearray(source_code)
+            for start, end in body_spans:
+                result[start:end] = b"{ ... }"
+
+            return result.decode("utf8")
+        except Exception as e:
+            print(f"[SKELETONIZER] Python skeletonization failed: {e}")
+            return None
+
+
 class SearchState(State):
     """
     Determines if the implementation already exists or where to edit.
@@ -340,14 +381,20 @@ class SearchState(State):
             context.data["errors"].append("Missing context for SEARCH.")
             return "IDLE"
 
-        try:
-            with open(filepath, "rb") as f:
-                source_code = f.read().decode("utf8")
-        except Exception as e:
-            context.data["errors"].append(f"Failed to read file {filepath}: {e}")
-            return "IDLE"
+        # Skeletonize using the new pure Python implementation
+        print(f"[{self.name}] Skeletonizing {filepath} (Python)...")
+        skeleton = Skeletonizer.skeletonize(filepath, profile)
+        
+        if skeleton is None:
+            # Fallback to raw if skeletonization fails
+            try:
+                with open(filepath, "rb") as f:
+                    skeleton = f.read().decode("utf8")
+            except Exception as e:
+                context.data["errors"].append(f"Failed to read file {filepath}: {e}")
+                return "IDLE"
 
-        if not source_code.strip():
+        if not skeleton.strip():
             context.data["target_name"] = ""
             return "SENSE"
 
@@ -355,10 +402,9 @@ class SearchState(State):
             f"You are an expert {profile.name} developer. DO NOT use <think> tags. "
             f"Output ONLY 'EXISTS' or the name of the function to edit. No chat."
         )
-        user_prompt = f"Intent: {intent}\n\nFile: {source_code}"
+        user_prompt = f"Intent: {intent}\n\nSkeleton of {filepath}:\n{skeleton}"
 
-        print(f"[{self.name}] Querying LLM (Early Exit enabled)...")
-        # Use streaming + stop_at_newline to kill rambling instantly
+        print(f"[{self.name}] Querying LLM with skeletonized context...")
         response = self.llm.generate(system_prompt, user_prompt, max_tokens=100, stream=True, stop_at_newline=True)
 
         if not response:
