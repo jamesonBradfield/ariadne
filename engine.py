@@ -1,13 +1,37 @@
+import os
+from typing import Optional
+from profiles.base import LanguageProfile
+from profiles.rust_profile import RustProfile
 from components import (
     CodingState,
     DriveByWireActuator,
     ECUPromptCompiler,
-    LLMProvider,
+    LiteLLMProvider,
     SearchState,
     SyntaxGate,
     TreeSitterSensor,
 )
 from core import EngineContext, State
+
+
+class ProfileLoader:
+    """
+    Registry and loader for language profiles based on file extension.
+    """
+
+    _profiles = [
+        RustProfile(),
+        # Add more profiles here
+    ]
+
+    @classmethod
+    def get_profile_for_file(cls, filepath: str) -> Optional[LanguageProfile]:
+        _, ext = os.path.splitext(filepath)
+        for profile in cls._profiles:
+            if ext in profile.extensions:
+                return profile
+        return None
+
 
 # --- DEFINE OUR CONCRETE STATES ---
 
@@ -28,42 +52,40 @@ class SenseState(State):
         if not target_data:
             print("ERROR: Could not find target node.")
             context.data["errors"].append("Node not found.")
-            return "IDLE"  # Abort
+            return "IDLE"
 
         print(
             f"Target acquired: bytes {target_data['start_byte']} to {target_data['end_byte']}"
         )
         context.data["extracted_node"] = target_data
 
-        return "CODING"  # Shift to coding state
+        return "CODING"
 
 
 class SyntaxGateState(State):
-    def __init__(self, language_ptr):
+    def __init__(self, language_ptr, language_name):
         super().__init__(name="SYNTAX_GATE")
         self.syntax_gate = SyntaxGate(language_ptr)
+        self.language_name = language_name
 
     def execute(self, context: EngineContext) -> str:
-        # Get the payload to validate (this would come from LLM in later phases)
         payload = context.data.get("llm_payload", "")
         if not payload:
             print("ERROR: No payload to validate.")
             context.data["errors"].append("No payload provided.")
             return "IDLE"
 
-        print(f"[{self.name}] Validating payload...")
+        print(f"[{self.name}] Validating payload for {self.language_name}...")
         result = self.syntax_gate.validate(payload)
 
         if result["valid"]:
-            print(f"[{self.name}] Payload is valid Rust.")
-            # Keep the payload as is for actuation
+            print(f"[{self.name}] Payload is valid {self.language_name}.")
             return "ACTUATE"
         else:
             print(f"[{self.name}] Payload is invalid: {result['error_message']}")
             context.data["errors"].append(
                 f"Syntax validation failed: {result['error_message']}"
             )
-            # Optionally, we could try to fix it here, but for now we abort
             return "IDLE"
 
 
@@ -94,19 +116,22 @@ class ActuateState(State):
             print("Drive-by-Wire failed.")
             context.data["errors"].append("Splice failed.")
 
-        return "IDLE"  # Mission complete, drop to idle
+        return "IDLE"
 
 
 # --- THE ENGINE RUNNER ---
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser(description="Ariadne Engine")
+    parser.add_argument("--step", action="store_true", help="Pause between states for manual approval")
+    parser.add_argument("--file", default="test.rs", help="File to operate on")
+    args = parser.parse_args()
+
     # 1. Initialize the shared memory bus
     context = EngineContext()
-    context.data["filepath"] = "test.rs"
-    # Placeholder for target_func; will be set by SEARCH state if needed.
-    context.data["target_func"] = ""
-    # Give the LLM its marching orders
+    context.data["filepath"] = args.file
     context.data["user_intent"] = """
     Rewrite take_damage to implement armor mitigation and a death state:
     1. If the incoming amount is greater than 50, reduce the amount by 20% (use integer math).
@@ -114,31 +139,34 @@ def main():
     3. If self.health drops to 0 or below, clamp it to 0 and print "CRITICAL: Player Dead!".
     4. Otherwise, print the remaining health.
     """
-    # Set language for profile-specific components
-    context.data["language"] = "Rust"
 
-    # 2. Register our available states
-    # Import tree_sitter_rust here for language-specific instantiation
-    import tree_sitter_rust
+    # 2. Detect and load profile
+    profile = ProfileLoader.get_profile_for_file(context.data["filepath"])
+    if not profile:
+        print(f"CRITICAL: No profile found for {context.data['filepath']}")
+        return
 
+    context.data["profile"] = profile
+    print(f"Loaded {profile.name} profile.")
+
+    # 3. Register our available states
     states_registry = {
-        "SEARCH": SearchState(verbose=True),
-        "SENSE": SenseState(tree_sitter_rust.language()),
-        "CODING": CodingState(),
-        "SYNTAX_GATE": SyntaxGateState(tree_sitter_rust.language()),
+        "SEARCH": SearchState(verbose=True), 
+        "SENSE": SenseState(profile.get_language_ptr()),
+        "CODING": CodingState(verbose=True),
+        "SYNTAX_GATE": SyntaxGateState(profile.get_language_ptr(), profile.name),
         "ACTUATE": ActuateState(),
     }
 
-    # 3. Start the ignition
+    # 4. Start the ignition
     current_state_name = "SEARCH"
 
-    # 4. The main Engine Loop with benchmarking
+    # 5. The main Engine Loop with benchmarking
     import time
 
     total_start_time = time.time()
 
     while current_state_name != "IDLE":
-        # Look up the state object
         active_state = states_registry.get(current_state_name)
 
         if not active_state:
@@ -146,24 +174,38 @@ def main():
             break
 
         active_state.enter(context)
+        
+        # --- INTERVENTION GATE ---
+        if args.step:
+            print(f"\n[INTERVENE] Next State: {active_state.name}")
+            if active_state.name == "SENSE" and context.data.get("target_name"):
+                print(f"Target Symbol: '{context.data['target_name']}'")
+            
+            user_input = input("Proceed? [Y/n/edit]: ").strip().lower()
+            if user_input == 'n':
+                print("Execution aborted by user.")
+                break
+            elif user_input == 'edit':
+                if active_state.name == "SENSE":
+                    new_target = input(f"Override target name (current: {context.data['target_name']}): ").strip()
+                    if new_target:
+                        context.data["target_name"] = new_target
+                        context.data["target_func"] = profile.get_query(new_target)
+                else:
+                    print("Edit not supported for this state yet.")
+
         state_start_time = time.time()
-        # Execute returns the string name of the next state
         next_state_name = active_state.execute(context)
         state_end_time = time.time()
         state_duration = state_end_time - state_start_time
         active_state.exit(context)
 
-        print(
-            f"[BENCHMARK] {active_state.name} state took {state_duration:.2f} seconds"
-        )
-
-        # Shift gears
+        print(f"[BENCHMARK] {active_state.name} took {state_duration:.2f}s")
         current_state_name = next_state_name
 
-    total_end_time = time.time()
-    total_duration = total_end_time - total_start_time
-    print(f"[BENCHMARK] Total engine execution time: {total_duration:.2f} seconds")
-    print("\nEngine dropped to IDLE. Execution finished.")
+    total_duration = time.time() - total_start_time
+    print(f"\n[BENCHMARK] Total time: {total_duration:.2f}s")
+    print("Engine dropped to IDLE.")
     if context.data["errors"]:
         print(f"Errors reported: {context.data['errors']}")
 

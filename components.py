@@ -197,12 +197,31 @@ class ECUPromptCompiler:
         return system_prompt, user_prompt
 
 
-class LLMProvider:
-    """A lightweight, zero-dependency wrapper for llama.cpp server."""
+class LiteLLMProvider:
+    """
+    A lightweight wrapper for litellm, allowing connection to any LLM backend.
+    """
 
-    def __init__(self, base_url="http://localhost:8080/v1", verbose: bool = False):
-        self.base_url = base_url
+    def __init__(
+        self,
+        model: Optional[str] = None,
+        base_url: Optional[str] = None,
+        verbose: bool = False,
+    ):
+        import litellm
+
+        # 1. Prioritize passed args, then Env, then local defaults
+        self.base_url = base_url or os.getenv("ARIADNE_API_BASE") or "http://localhost:8080/v1"
+        
+        default_model = "openai/llama-cpp" if "localhost" in self.base_url else "ollama/llama3"
+        self.model = model or os.getenv("ARIADNE_MODEL") or default_model
+        
         self.verbose = verbose
+        if self.verbose:
+            print(f"[LLM] Initialized with Model: {self.model}, Base: {self.base_url}")
+            os.environ["LITELLM_LOG"] = "DEBUG"
+        
+        self.api_key = os.getenv("ARIADNE_API_KEY") or "none"
 
     def generate(
         self,
@@ -210,128 +229,96 @@ class LLMProvider:
         user_prompt: str,
         max_tokens: int = 2048,
         stop_sequences: list = None,
-        disable_thinking: bool = False,
+        stream: bool = False,
+        stop_at_newline: bool = False,
+        max_retries: int = 5,
     ) -> str:
+        import litellm
         import time
+        from litellm.exceptions import ServiceUnavailableError
 
-        start_time = time.time()
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
 
-        data = {
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            "temperature": 0.1,  # Keep it highly deterministic
-            "max_tokens": max_tokens,
-            "stream": False,
-        }
-
-        if disable_thinking:
-            data["think"] = False
-
-        if stop_sequences:
-            data["stop"] = stop_sequences
-
-        req = urllib.request.Request(
-            f"{self.base_url}/chat/completions",
-            data=json.dumps(data).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-        )
-
-        try:
-            if self.verbose:
-                print(f"[LLM] Sending request to {self.base_url}/chat/completions...")
-                print(f"[LLM] === FULL SYSTEM PROMPT ({len(system_prompt)} chars) ===")
-                print(system_prompt)
-                print(f"[LLM] === END SYSTEM PROMPT ===")
-                print(f"[LLM] === FULL USER PROMPT ({len(user_prompt)} chars) ===")
-                print(user_prompt)
-                print(f"[LLM] === END USER PROMPT ===")
-                print(
-                    f"[LLM] max_tokens={max_tokens}, stop={stop_sequences}, disable_thinking={disable_thinking}"
-                )
-            req_start = time.time()
-            with urllib.request.urlopen(req, timeout=60) as response:
-                req_end = time.time()
+        for attempt in range(max_retries):
+            try:
                 if self.verbose:
-                    print(f"[LLM] Request took {req_end - req_start:.2f} seconds")
+                    print(f"[LLM] Sending request to {self.model} (stream={stream}, attempt={attempt+1})...")
 
-                result = json.loads(response.read().decode("utf-8"))
-                raw_code = result["choices"][0]["message"]["content"].strip()
-
-                if self.verbose:
-                    print(f"[LLM] === RAW RESPONSE ({len(raw_code)} chars) ===")
-                    print(raw_code)
-                    print(f"[LLM] === END RAW RESPONSE ===")
-
-                # Strip thinking tags from Qwen3 responses (including partial tags when stopped mid-generation)
-                import re
-
-                raw_code = re.sub(
-                    r"<think>.*?</think>", "", raw_code, flags=re.DOTALL
-                ).strip()
-                raw_code = re.sub(
-                    r"<think>.*", "", raw_code
-                ).strip()  # Strip partial opening tags
-                raw_code = raw_code.strip()  # Clean up any leftover whitespace
-
-                # Safety Net: Strip markdown blocks if the model hallucinates them
-                if raw_code.startswith("```"):
-                    raw_code = "\n".join(raw_code.split("\n")[1:])
-                if raw_code.endswith("```"):
-                    raw_code = "\n".join(raw_code.split("\n")[:-1])
-
-                end_time = time.time()
-                if self.verbose:
-                    print(
-                        f"[LLM] Total generation took {end_time - start_time:.2f} seconds"
+                if stream:
+                    response_iter = litellm.completion(
+                        model=self.model,
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature=0.1,
+                        api_base=self.base_url,
+                        api_key=self.api_key,
+                        stop=stop_sequences,
+                        stream=True,
                     )
-                return raw_code.strip()
+                    
+                    full_content = ""
+                    for chunk in response_iter:
+                        content = chunk.choices[0].delta.content
+                        if content:
+                            full_content += content
+                            if stop_at_newline and ("\n" in full_content or len(full_content.strip().split()) > 5):
+                                break
+                    return full_content.strip()
+                else:
+                    response = litellm.completion(
+                        model=self.model,
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature=0.1,
+                        api_base=self.base_url,
+                        api_key=self.api_key,
+                        stop=stop_sequences,
+                    )
+                    return response.choices[0].message.content.strip()
 
-        except URLError as e:
-            end_time = time.time()
-            if self.verbose:
-                print(
-                    f"[LLM] Connection Error after {end_time - start_time:.2f} seconds: {e}"
-                )
-            return None
-        except Exception as e:
-            end_time = time.time()
-            if self.verbose:
-                print(
-                    f"[LLM] Unexpected Error after {end_time - start_time:.2f} seconds: {e}"
-                )
-            return None
+            except ServiceUnavailableError as e:
+                if "Loading model" in str(e) and attempt < max_retries - 1:
+                    wait_time = (attempt + 1) * 5
+                    print(f"[LLM] Server is still loading model. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+                raise e
+            except Exception as e:
+                if self.verbose: print(f"[LLM] Error: {e}")
+                return None
+        return None
 
 
 class CodingState(State):
     def __init__(self, verbose: bool = True):
         super().__init__(name="CODING")
-        self.llm = LLMProvider(base_url="http://localhost:8080/v1", verbose=verbose)
+        self.llm = LiteLLMProvider(verbose=verbose)
 
     def execute(self, context: EngineContext) -> str:
         target_data = context.data.get("extracted_node")
         intent = context.data.get("user_intent")
-        language = context.data.get("language")
+        profile = context.data.get("profile")
 
-        if not target_data or not intent:
-            context.data["errors"].append("Missing target data or intent for CODING.")
+        if not target_data or not intent or not profile:
+            context.data["errors"].append("Missing context for CODING.")
             return "IDLE"
 
         sys_prompt, usr_prompt = ECUPromptCompiler.compile(
-            language, target_data["node_string"], intent
+            profile.name, target_data["node_string"], intent
         )
 
-        print(f"[{self.name}] Firing ECU (Local LLM at 8080)...")
-        response = self.llm.generate(sys_prompt, usr_prompt)
+        print(f"[{self.name}] Firing ECU (Streaming Code Generation)...")
+        # Code generation might benefit from seeing the whole thing, but we stream to show progress
+        response = self.llm.generate(sys_prompt, usr_prompt, stream=False) 
 
         if not response:
-            context.data["errors"].append("LLM generation failed or timed out.")
+            context.data["errors"].append("LLM generation failed.")
             return "IDLE"
 
-        print(f"[{self.name}] Neural payload received ({len(response)} bytes).")
         context.data["llm_payload"] = response
-
         return "SYNTAX_GATE"
 
 
@@ -342,18 +329,17 @@ class SearchState(State):
 
     def __init__(self, verbose: bool = True):
         super().__init__(name="SEARCH")
-        self.llm = LLMProvider(base_url="http://localhost:8080/v1", verbose=verbose)
+        self.llm = LiteLLMProvider(verbose=verbose)
 
     def execute(self, context: EngineContext) -> str:
         filepath = context.data.get("filepath")
         intent = context.data.get("user_intent")
-        language = context.data.get("language")
+        profile = context.data.get("profile")
 
-        if not filepath or not intent:
-            context.data["errors"].append("Missing filepath or intent for SEARCH.")
+        if not filepath or not intent or not profile:
+            context.data["errors"].append("Missing context for SEARCH.")
             return "IDLE"
 
-        # Read the entire file content
         try:
             with open(filepath, "rb") as f:
                 source_code = f.read().decode("utf8")
@@ -361,66 +347,35 @@ class SearchState(State):
             context.data["errors"].append(f"Failed to read file {filepath}: {e}")
             return "IDLE"
 
-        # If the file is empty, we definitely need to implement
         if not source_code.strip():
-            context.data["target_name"] = ""  # Will need to be handled differently
+            context.data["target_name"] = ""
             return "SENSE"
 
         system_prompt = (
-            f"You are an expert {language} developer. DO NOT use <think> tags. "
-            f"Your task is to determine if the user's intent "
-            f"is already satisfied by the provided code. If the implementation already exists and fully "
-            f"meets the intent, respond with the exact string 'EXISTS' (no quotes). "
-            f"If the implementation does not exist or is incomplete, respond with the name of the function "
-            f"or item that needs to be created or modified to fulfill the intent. "
-            f"Respond with ONLY that string, no extra text, no markdown, no explanation."
+            f"You are an expert {profile.name} developer. DO NOT use <think> tags. "
+            f"Output ONLY 'EXISTS' or the name of the function to edit. No chat."
         )
-        user_prompt = (
-            f"User Intent:\n{intent}\n\n"
-            f"Full File Content ({filepath}):\n{source_code}\n\n"
-            f"Does the implementation already exist? If yes, output EXISTS. If no, output the name of the function/item to edit/create."
-        )
+        user_prompt = f"Intent: {intent}\n\nFile: {source_code}"
 
-        print(f"[{self.name}] Querying LLM to check if implementation exists...")
-        # Use disable_thinking to prevent rambling
-        response = self.llm.generate(
-            system_prompt, user_prompt, max_tokens=300, disable_thinking=True
-        )
+        print(f"[{self.name}] Querying LLM (Early Exit enabled)...")
+        # Use streaming + stop_at_newline to kill rambling instantly
+        response = self.llm.generate(system_prompt, user_prompt, max_tokens=100, stream=True, stop_at_newline=True)
 
         if not response:
-            context.data["errors"].append("LLM generation failed in SEARCH state.")
+            context.data["errors"].append("LLM generation failed in SEARCH.")
             return "IDLE"
 
         response = response.strip()
-        print(f"[{self.name}] LLM raw response: '{response}'")
-
         if response.upper() == "EXISTS":
-            print(
-                f"[{self.name}] Implementation already exists. Skipping coding phase."
-            )
-            context.data["skip_coding"] = True
+            print(f"[{self.name}] Implementation already exists.")
             return "IDLE"
         else:
-            # Parse the function name from the response
-            import re
-
-            target_name = response
-            # Try to extract just the function name
-            fn_match = re.search(r"fn\s+(\w+)", target_name)
-            if fn_match:
-                target_name = fn_match.group(1)
-            else:
-                # Basic sanitization: take first line, strip whitespace
-                target_name = target_name.split("\n")[0].strip()
-
+            target_name = profile.parse_search_result(response)
             if not target_name:
-                context.data["errors"].append("LLM did not return a valid target name.")
+                context.data["errors"].append("LLM returned an invalid target.")
                 return "IDLE"
+
             context.data["target_name"] = target_name
-            # Construct a default Tree-sitter query for a function item with this name.
-            # This assumes the target is a function; we could make this more dynamic later.
-            context.data["target_func"] = (
-                f'(function_item name: (identifier) @func_name (#eq? @func_name "{target_name}")) @function'
-            )
-            print(f"[{self.name}] Target set to '{target_name}'. Proceeding to SENSE.")
+            context.data["target_func"] = profile.get_query(target_name)
+            print(f"[{self.name}] Target acquired: '{target_name}'.")
             return "SENSE"
