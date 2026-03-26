@@ -1,11 +1,17 @@
+import logging
 import os
 import subprocess
+import time
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.error import URLError
 
+import litellm
 import tree_sitter
+from litellm.exceptions import ServiceUnavailableError
 
-from core import EngineContext, State
+from core import State
+
+logger = logging.getLogger("ariadne.components")
 
 
 class TreeSitterSensor:
@@ -25,18 +31,18 @@ class TreeSitterSensor:
         """
         Reads the file, runs the query, and returns the exact physical coordinates of the target.
         """
-        print(f"[SENSOR] Query string: {query_string}")
+        logger.debug(f"[SENSOR] Query string: {query_string}")
         with open(filepath, "rb") as f:
             source_code = f.read()
 
-        print(f"[SENSOR] Source code length: {len(source_code)} bytes")
+        logger.debug(f"[SENSOR] Source code length: {len(source_code)} bytes")
         tree = self.parser.parse(source_code)
         query = tree_sitter.Query(self.language, query_string)
 
         query_cursor = tree_sitter.QueryCursor(query)
         captures = query_cursor.captures(tree.root_node)
 
-        print(f"[SENSOR] Captures found: {captures}")
+        logger.debug(f"[SENSOR] Captures found: {captures}")
 
         if capture_name in captures and captures[capture_name]:
             # Grab the very first match found
@@ -174,7 +180,7 @@ class DriveByWireActuator:
 
             return True
         except Exception as e:
-            print(f"Drive-by-Wire failure: {e}")
+            logger.error(f"Drive-by-Wire failure: {e}")
             return False
 
 
@@ -206,8 +212,6 @@ class LiteLLMProvider:
         base_url: Optional[str] = None,
         verbose: bool = False,
     ):
-        import litellm
-
         # 1. Prioritize passed args, then Env, then local defaults
         self.base_url = (
             base_url or os.getenv("ARIADNE_API_BASE") or "http://localhost:8080/v1"
@@ -220,8 +224,9 @@ class LiteLLMProvider:
 
         self.verbose = verbose
         if self.verbose:
-            print(f"[LLM] Initialized with Model: {self.model}, Base: {self.base_url}")
-            os.environ["LITELLM_LOG"] = "DEBUG"
+            logger.info(
+                f"[LLM] Initialized with Model: {self.model}, Base: {self.base_url}"
+            )
 
         self.api_key = os.getenv("ARIADNE_API_KEY") or "none"
 
@@ -235,20 +240,19 @@ class LiteLLMProvider:
         stop_at_newline: bool = False,
         max_retries: int = 5,
     ) -> str:
-        import time
-
-        import litellm
-        from litellm.exceptions import ServiceUnavailableError
-
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ]
 
+        if self.verbose:
+            logger.info(f"[LLM] System Prompt: {system_prompt}")
+            logger.info(f"[LLM] User Prompt: {user_prompt}")
+
         for attempt in range(max_retries):
             try:
                 if self.verbose:
-                    print(
+                    logger.info(
                         f"[LLM] Sending request to {self.model} (stream={stream}, attempt={attempt + 1})..."
                     )
 
@@ -290,7 +294,7 @@ class LiteLLMProvider:
             except ServiceUnavailableError as e:
                 if "Loading model" in str(e) and attempt < max_retries - 1:
                     wait_time = (attempt + 1) * 5
-                    print(
+                    logger.warning(
                         f"[LLM] Server is still loading model. Retrying in {wait_time}s..."
                     )
                     time.sleep(wait_time)
@@ -298,7 +302,7 @@ class LiteLLMProvider:
                 raise e
             except Exception as e:
                 if self.verbose:
-                    print(f"[LLM] Error: {e}")
+                    logger.error(f"[LLM] Error: {e}")
                 return None
         return None
 
@@ -308,29 +312,10 @@ class CodingState(State):
         super().__init__(name="CODING")
         self.llm = LiteLLMProvider(verbose=verbose)
 
-    def execute(self, context: EngineContext) -> str:
-        target_data = context.data.get("extracted_node")
-        intent = context.data.get("user_intent")
-        profile = context.data.get("profile")
-
-        if not target_data or not intent or not profile:
-            context.data["errors"].append("Missing context for CODING.")
-            return "IDLE"
-
-        sys_prompt, usr_prompt = ECUPromptCompiler.compile(
-            profile.name, target_data["node_string"], intent
-        )
-
-        print(f"[{self.name}] Firing ECU (Streaming Code Generation)...")
-        # Code generation might benefit from seeing the whole thing, but we stream to show progress
-        response = self.llm.generate(sys_prompt, usr_prompt, stream=False)
-
-        if not response:
-            context.data["errors"].append("LLM generation failed.")
-            return "IDLE"
-
-        context.data["llm_payload"] = response
-        return "SYNTAX_GATE"
+    def tick(self, payload: Any) -> Tuple[str, Any]:
+        # Placeholder: Logic to be implemented in Phase 2
+        logger.info(f"[{self.name}] Firing ECU...")
+        return "SYNTAX_GATE", payload
 
 
 class Skeletonizer:
@@ -370,7 +355,7 @@ class Skeletonizer:
 
             return result.decode("utf8")
         except Exception as e:
-            print(f"[SKELETONIZER] Python skeletonization failed: {e}")
+            logger.error(f"[SKELETONIZER] Python skeletonization failed: {e}")
             return None
 
 
@@ -383,62 +368,7 @@ class SearchState(State):
         super().__init__(name="SEARCH")
         self.llm = LiteLLMProvider(verbose=verbose)
 
-    def execute(self, context: EngineContext) -> str:
-        filepath = context.data.get("filepath")
-        intent = context.data.get("user_intent")
-        profile = context.data.get("profile")
-
-        if not filepath or not intent or not profile:
-            context.data["errors"].append("Missing context for SEARCH.")
-            return "IDLE"
-
-        # Skeletonize using the new pure Python implementation
-        print(f"[{self.name}] Skeletonizing {filepath} (Python)...")
-        skeleton = Skeletonizer.skeletonize(filepath, profile)
-
-        if skeleton is None:
-            # Fallback to raw if skeletonization fails
-            try:
-                with open(filepath, "rb") as f:
-                    skeleton = f.read().decode("utf8")
-            except Exception as e:
-                context.data["errors"].append(f"Failed to read file {filepath}: {e}")
-                return "IDLE"
-
-        if not skeleton.strip():
-            context.data["target_name"] = ""
-            return "SENSE"
-
-        system_prompt = (
-            f"You are an expert {profile.name} developer. DO NOT use <think> tags. "
-            f"Output ONLY 'EXISTS' or the name of the function to edit. No chat."
-        )
-        user_prompt = f"Intent: {intent}\n\nSkeleton of {filepath}:\n{skeleton}"
-
-        print(f"[{self.name}] Querying LLM with skeletonized context...")
-        response = self.llm.generate(
-            system_prompt,
-            user_prompt,
-            max_tokens=100,
-            stream=True,
-            stop_at_newline=True,
-        )
-
-        if not response:
-            context.data["errors"].append("LLM generation failed in SEARCH.")
-            return "IDLE"
-
-        response = response.strip()
-        if response.upper() == "EXISTS":
-            print(f"[{self.name}] Implementation already exists.")
-            return "IDLE"
-        else:
-            target_name = profile.parse_search_result(response)
-            if not target_name:
-                context.data["errors"].append("LLM returned an invalid target.")
-                return "IDLE"
-
-            context.data["target_name"] = target_name
-            context.data["target_func"] = profile.get_query(target_name)
-            print(f"[{self.name}] Target acquired: '{target_name}'.")
-            return "SENSE"
+    def tick(self, payload: Any) -> Tuple[str, Any]:
+        # Placeholder: Logic to be implemented in Phase 2
+        logger.info(f"[{self.name}] Querying LLM with skeletonized context...")
+        return "SENSE", payload

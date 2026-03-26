@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import Optional
+from typing import Optional, Tuple, Any
 
 from components import (
     CodingState,
@@ -14,7 +14,8 @@ from components import (
 
 # This creates a logger named 'core' that other files can import
 logger = logging.getLogger("ariadne.core")
-from core import EngineContext, State
+from core import State
+from payloads import JobPayload, ContextPayload
 from profiles.base import LanguageProfile
 from profiles.rust_profile import RustProfile
 
@@ -46,25 +47,10 @@ class SenseState(State):
         super().__init__(name="SENSE")
         self.sensor = TreeSitterSensor(language_ptr)
 
-    def execute(self, context: EngineContext) -> str:
-        filepath = context.data["filepath"]
-        target = context.data["target_func"]
-
-        target_data = self.sensor.extract_node(
-            filepath, query_string=target, capture_name="function"
-        )
-
-        if not target_data:
-            logger.error("Could not find target node.")
-            context.data["errors"].append("Node not found.")
-            return "IDLE"
-
-        logger.info(
-            f"Target acquired: bytes {target_data['start_byte']} to {target_data['end_byte']}"
-        )
-        context.data["extracted_node"] = target_data
-
-        return "CODING"
+    def tick(self, payload: JobPayload) -> Tuple[str, JobPayload]:
+        # Placeholder: Logic to be implemented in Phase 2
+        logger.info(f"[{self.name}] Tick with payload: {payload.intent[:50]}...")
+        return "CODING", payload
 
 
 class SyntaxGateState(State):
@@ -73,55 +59,20 @@ class SyntaxGateState(State):
         self.syntax_gate = SyntaxGate(language_ptr)
         self.language_name = language_name
 
-    def execute(self, context: EngineContext) -> str:
-        payload = context.data.get("llm_payload", "")
-        if not payload:
-            logger.error("No payload to validate.")
-            context.data["errors"].append("No payload provided.")
-            return "IDLE"
-
+    def tick(self, payload: JobPayload) -> Tuple[str, JobPayload]:
+        # Placeholder: Logic to be implemented in Phase 2
         logger.info(f"[{self.name}] Validating payload for {self.language_name}...")
-        result = self.syntax_gate.validate(payload)
-
-        if result["valid"]:
-            logger.info(f"[{self.name}] Payload is valid {self.language_name}.")
-            return "ACTUATE"
-        else:
-            logger.error(f"[{self.name}] Payload is invalid: {result['error_message']}")
-            context.data["errors"].append(
-                f"Syntax validation failed: {result['error_message']}"
-            )
-            return "IDLE"
+        return "ACTUATE", payload
 
 
 class ActuateState(State):
     def __init__(self):
         super().__init__(name="ACTUATE")
 
-    def execute(self, context: EngineContext) -> str:
-        target_data = context.data["extracted_node"]
-        new_payload = context.data["llm_payload"]
-
-        if not new_payload:
-            logger.error("No payload to actuate.")
-            context.data["errors"].append("No payload for actuation.")
-            return "IDLE"
-
-        success = DriveByWireActuator.splice(
-            filepath=context.data["filepath"],
-            full_source=target_data["full_source"],
-            start_byte=target_data["start_byte"],
-            end_byte=target_data["end_byte"],
-            new_payload=new_payload,
-        )
-
-        if success:
-            logger.info("Drive-by-Wire successful.")
-        else:
-            logger.error("Drive-by-Wire failed.")
-            context.data["errors"].append("Splice failed.")
-
-        return "IDLE"
+    def tick(self, payload: JobPayload) -> Tuple[str, JobPayload]:
+        # Placeholder: Logic to be implemented in Phase 2
+        logger.info(f"[{self.name}] Actuating...")
+        return "IDLE", payload
 
 
 # --- THE ENGINE RUNNER ---
@@ -151,31 +102,40 @@ def main():
         datefmt="%H:%M:%S",
     )
 
-    # 1. Initialize the shared memory bus
-    context = EngineContext()
-    context.data["filepath"] = args.file
-    context.data["user_intent"] = """
+    # Silence noisy third-party loggers
+    logging.getLogger("litellm").setLevel(logging.WARNING)
+    logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+    logging.getLogger("openai").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("asyncio").setLevel(logging.WARNING)
+
+    # 1. Initialize the Job Payload
+    payload = JobPayload(
+        intent="""
     Rewrite take_damage to implement armor mitigation and a death state:
     1. If the incoming amount is greater than 50, reduce the amount by 20% (use integer math).
     2. Subtract the final amount from self.health.
     3. If self.health drops to 0 or below, clamp it to 0 and print "CRITICAL: Player Dead!".
     4. Otherwise, print the remaining health.
-    """
+    """,
+        target_files=[args.file]
+    )
 
     # 2. Detect and load profile
-    profile = ProfileLoader.get_profile_for_file(context.data["filepath"])
+    profile = ProfileLoader.get_profile_for_file(args.file)
     if not profile:
-        logger.critical(f"No profile found for {context.data['filepath']}")
+        logger.critical(f"No profile found for {args.file}")
         return
 
-    context.data["profile"] = profile
     logger.info(f"Loaded {profile.name} profile.")
 
     # 3. Register our available states
+    # NOTE: These states currently still use the old execute() internally or are broken
+    # until they are refactored in the next phase.
     states_registry = {
-        "SEARCH": SearchState(verbose=(args.log_level == "DEBUG")),
+        "SEARCH": SearchState(verbose=True),
         "SENSE": SenseState(profile.get_language_ptr()),
-        "CODING": CodingState(verbose=(args.log_level == "DEBUG")),
+        "CODING": CodingState(verbose=True),
         "SYNTAX_GATE": SyntaxGateState(profile.get_language_ptr(), profile.name),
         "ACTUATE": ActuateState(),
     }
@@ -195,34 +155,21 @@ def main():
             logger.critical(f"Unknown state requested: {current_state_name}")
             break
 
-        active_state.enter(context)
-
         # --- INTERVENTION GATE ---
         if args.step:
             print(f"\n[INTERVENE] Next State: {active_state.name}")
-            if active_state.name == "SENSE" and context.data.get("target_name"):
-                print(f"Target Symbol: '{context.data['target_name']}'")
-
-            user_input = input("Proceed? [Y/n/edit]: ").strip().lower()
+            user_input = input("Proceed? [Y/n]: ").strip().lower()
             if user_input == "n":
                 logger.warning("Execution aborted by user.")
                 break
-            elif user_input == "edit":
-                if active_state.name == "SENSE":
-                    new_target = input(
-                        f"Override target name (current: {context.data['target_name']}): "
-                    ).strip()
-                    if new_target:
-                        context.data["target_name"] = new_target
-                        context.data["target_func"] = profile.get_query(new_target)
-                else:
-                    print("Edit not supported for this state yet.")
 
         state_start_time = time.time()
-        next_state_name = active_state.execute(context)
+        
+        # Pure function tick: Payload in, (next_state, Payload) out.
+        next_state_name, payload = active_state.tick(payload)
+        
         state_end_time = time.time()
         state_duration = state_end_time - state_start_time
-        active_state.exit(context)
 
         logger.info(f"[BENCHMARK] {active_state.name} took {state_duration:.2f}s")
         current_state_name = next_state_name
@@ -230,8 +177,6 @@ def main():
     total_duration = time.time() - total_start_time
     logger.info(f"[BENCHMARK] Total time: {total_duration:.2f}s")
     logger.info("Engine dropped to IDLE.")
-    if context.data["errors"]:
-        logger.error(f"Errors reported: {context.data['errors']}")
 
 
 if __name__ == "__main__":
