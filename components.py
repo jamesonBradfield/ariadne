@@ -27,14 +27,18 @@ class TreeSitterSensor:
         """
         Reads the file, runs the query, and returns the exact physical coordinates of the target.
         """
+        print(f"[SENSOR] Query string: {query_string}")
         with open(filepath, "rb") as f:
             source_code = f.read()
 
+        print(f"[SENSOR] Source code length: {len(source_code)} bytes")
         tree = self.parser.parse(source_code)
         query = tree_sitter.Query(self.language, query_string)
 
         query_cursor = tree_sitter.QueryCursor(query)
         captures = query_cursor.captures(tree.root_node)
+
+        print(f"[SENSOR] Captures found: {captures}")
 
         if capture_name in captures and captures[capture_name]:
             # Grab the very first match found
@@ -200,7 +204,14 @@ class LLMProvider:
         self.base_url = base_url
         self.verbose = verbose
 
-    def generate(self, system_prompt: str, user_prompt: str) -> str:
+    def generate(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int = 2048,
+        stop_sequences: list = None,
+        disable_thinking: bool = False,
+    ) -> str:
         import time
 
         start_time = time.time()
@@ -211,9 +222,15 @@ class LLMProvider:
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": 0.1,  # Keep it highly deterministic
-            "max_tokens": 2048,
+            "max_tokens": max_tokens,
             "stream": False,
         }
+
+        if disable_thinking:
+            data["think"] = False
+
+        if stop_sequences:
+            data["stop"] = stop_sequences
 
         req = urllib.request.Request(
             f"{self.base_url}/chat/completions",
@@ -225,9 +242,7 @@ class LLMProvider:
             if self.verbose:
                 print(f"[LLM] Sending request to {self.base_url}/chat/completions...")
             req_start = time.time()
-            with urllib.request.urlopen(
-                req, timeout=60
-            ) as response:  # Increased timeout for SEARCH
+            with urllib.request.urlopen(req, timeout=60) as response:
                 req_end = time.time()
                 if self.verbose:
                     print(f"[LLM] Request took {req_end - req_start:.2f} seconds")
@@ -237,6 +252,17 @@ class LLMProvider:
 
                 if self.verbose:
                     print(f"[LLM] RAW RESPONSE:\n{raw_code}")
+
+                # Strip thinking tags from Qwen3 responses (including partial tags when stopped mid-generation)
+                import re
+
+                raw_code = re.sub(
+                    r"<think>.*?</think>", "", raw_code, flags=re.DOTALL
+                ).strip()
+                raw_code = re.sub(
+                    r"<think>.*", "", raw_code
+                ).strip()  # Strip partial opening tags
+                raw_code = raw_code.strip()  # Clean up any leftover whitespace
 
                 # Safety Net: Strip markdown blocks if the model hallucinates them
                 if raw_code.startswith("```"):
@@ -268,9 +294,9 @@ class LLMProvider:
 
 
 class CodingState(State):
-    def __init__(self):
+    def __init__(self, verbose: bool = True):
         super().__init__(name="CODING")
-        self.llm = LLMProvider(base_url="http://localhost:8080/v1")
+        self.llm = LLMProvider(base_url="http://localhost:8080/v1", verbose=verbose)
 
     def execute(self, context: EngineContext) -> str:
         target_data = context.data.get("extracted_node")
@@ -330,7 +356,8 @@ class SearchState(State):
             return "SENSE"
 
         system_prompt = (
-            f"You are an expert {language} developer. Your task is to determine if the user's intent "
+            f"You are an expert {language} developer. DO NOT use <think> tags. "
+            f"Your task is to determine if the user's intent "
             f"is already satisfied by the provided code. If the implementation already exists and fully "
             f"meets the intent, respond with the exact string 'EXISTS' (no quotes). "
             f"If the implementation does not exist or is incomplete, respond with the name of the function "
@@ -344,7 +371,10 @@ class SearchState(State):
         )
 
         print(f"[{self.name}] Querying LLM to check if implementation exists...")
-        response = self.llm.generate(system_prompt, user_prompt)
+        # Use disable_thinking to prevent rambling
+        response = self.llm.generate(
+            system_prompt, user_prompt, max_tokens=300, disable_thinking=True
+        )
 
         if not response:
             context.data["errors"].append("LLM generation failed in SEARCH state.")
@@ -360,21 +390,26 @@ class SearchState(State):
             context.data["skip_coding"] = True
             return "IDLE"
         else:
-            # Assume the response is the target name (e.g., function name)
+            # Parse the function name from the response
+            import re
+
             target_name = response
-            # Basic sanitization: take first line, strip whitespace
-            target_name = target_name.split("\n")[0].strip()
+            # Try to extract just the function name
+            fn_match = re.search(r"fn\s+(\w+)", target_name)
+            if fn_match:
+                target_name = fn_match.group(1)
+            else:
+                # Basic sanitization: take first line, strip whitespace
+                target_name = target_name.split("\n")[0].strip()
+
             if not target_name:
                 context.data["errors"].append("LLM did not return a valid target name.")
                 return "IDLE"
             context.data["target_name"] = target_name
             # Construct a default Tree-sitter query for a function item with this name.
             # This assumes the target is a function; we could make this more dynamic later.
-            context.data["target_func"] = f"""
-            (function_item
-                name: (identifier) @func_name
-                (#eq? @func_name "{target_name}")
-            ) @function
-            """
+            context.data["target_func"] = (
+                f'(function_item name: (identifier) @func_name (#eq? @func_name "{target_name}")) @function'
+            )
             print(f"[{self.name}] Target set to '{target_name}'. Proceeding to SENSE.")
             return "SENSE"
