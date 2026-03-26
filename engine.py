@@ -1,7 +1,7 @@
+import logging
 import os
 from typing import Optional
-from profiles.base import LanguageProfile
-from profiles.rust_profile import RustProfile
+
 from components import (
     CodingState,
     DriveByWireActuator,
@@ -11,7 +11,12 @@ from components import (
     SyntaxGate,
     TreeSitterSensor,
 )
+
+# This creates a logger named 'core' that other files can import
+logger = logging.getLogger("ariadne.core")
 from core import EngineContext, State
+from profiles.base import LanguageProfile
+from profiles.rust_profile import RustProfile
 
 
 class ProfileLoader:
@@ -50,11 +55,11 @@ class SenseState(State):
         )
 
         if not target_data:
-            print("ERROR: Could not find target node.")
+            logger.error("Could not find target node.")
             context.data["errors"].append("Node not found.")
             return "IDLE"
 
-        print(
+        logger.info(
             f"Target acquired: bytes {target_data['start_byte']} to {target_data['end_byte']}"
         )
         context.data["extracted_node"] = target_data
@@ -71,18 +76,18 @@ class SyntaxGateState(State):
     def execute(self, context: EngineContext) -> str:
         payload = context.data.get("llm_payload", "")
         if not payload:
-            print("ERROR: No payload to validate.")
+            logger.error("No payload to validate.")
             context.data["errors"].append("No payload provided.")
             return "IDLE"
 
-        print(f"[{self.name}] Validating payload for {self.language_name}...")
+        logger.info(f"[{self.name}] Validating payload for {self.language_name}...")
         result = self.syntax_gate.validate(payload)
 
         if result["valid"]:
-            print(f"[{self.name}] Payload is valid {self.language_name}.")
+            logger.info(f"[{self.name}] Payload is valid {self.language_name}.")
             return "ACTUATE"
         else:
-            print(f"[{self.name}] Payload is invalid: {result['error_message']}")
+            logger.error(f"[{self.name}] Payload is invalid: {result['error_message']}")
             context.data["errors"].append(
                 f"Syntax validation failed: {result['error_message']}"
             )
@@ -98,7 +103,7 @@ class ActuateState(State):
         new_payload = context.data["llm_payload"]
 
         if not new_payload:
-            print("ERROR: No payload to actuate.")
+            logger.error("No payload to actuate.")
             context.data["errors"].append("No payload for actuation.")
             return "IDLE"
 
@@ -111,9 +116,9 @@ class ActuateState(State):
         )
 
         if success:
-            print("Drive-by-Wire successful.")
+            logger.info("Drive-by-Wire successful.")
         else:
-            print("Drive-by-Wire failed.")
+            logger.error("Drive-by-Wire failed.")
             context.data["errors"].append("Splice failed.")
 
         return "IDLE"
@@ -124,10 +129,27 @@ class ActuateState(State):
 
 def main():
     import argparse
+
     parser = argparse.ArgumentParser(description="Ariadne Engine")
-    parser.add_argument("--step", action="store_true", help="Pause between states for manual approval")
+    parser.add_argument(
+        "--step", action="store_true", help="Pause between states for manual approval"
+    )
     parser.add_argument("--file", default="test.rs", help="File to operate on")
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        help="Set the logging level",
+    )
     args = parser.parse_args()
+
+    # Configure logging based on flag
+    numeric_level = getattr(logging, args.log_level.upper(), None)
+    logging.basicConfig(
+        level=numeric_level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
 
     # 1. Initialize the shared memory bus
     context = EngineContext()
@@ -143,17 +165,17 @@ def main():
     # 2. Detect and load profile
     profile = ProfileLoader.get_profile_for_file(context.data["filepath"])
     if not profile:
-        print(f"CRITICAL: No profile found for {context.data['filepath']}")
+        logger.critical(f"No profile found for {context.data['filepath']}")
         return
 
     context.data["profile"] = profile
-    print(f"Loaded {profile.name} profile.")
+    logger.info(f"Loaded {profile.name} profile.")
 
     # 3. Register our available states
     states_registry = {
-        "SEARCH": SearchState(verbose=True), 
+        "SEARCH": SearchState(verbose=(args.log_level == "DEBUG")),
         "SENSE": SenseState(profile.get_language_ptr()),
-        "CODING": CodingState(verbose=True),
+        "CODING": CodingState(verbose=(args.log_level == "DEBUG")),
         "SYNTAX_GATE": SyntaxGateState(profile.get_language_ptr(), profile.name),
         "ACTUATE": ActuateState(),
     }
@@ -170,24 +192,26 @@ def main():
         active_state = states_registry.get(current_state_name)
 
         if not active_state:
-            print(f"CRITICAL FAULT: Unknown state requested: {current_state_name}")
+            logger.critical(f"Unknown state requested: {current_state_name}")
             break
 
         active_state.enter(context)
-        
+
         # --- INTERVENTION GATE ---
         if args.step:
             print(f"\n[INTERVENE] Next State: {active_state.name}")
             if active_state.name == "SENSE" and context.data.get("target_name"):
                 print(f"Target Symbol: '{context.data['target_name']}'")
-            
+
             user_input = input("Proceed? [Y/n/edit]: ").strip().lower()
-            if user_input == 'n':
-                print("Execution aborted by user.")
+            if user_input == "n":
+                logger.warning("Execution aborted by user.")
                 break
-            elif user_input == 'edit':
+            elif user_input == "edit":
                 if active_state.name == "SENSE":
-                    new_target = input(f"Override target name (current: {context.data['target_name']}): ").strip()
+                    new_target = input(
+                        f"Override target name (current: {context.data['target_name']}): "
+                    ).strip()
                     if new_target:
                         context.data["target_name"] = new_target
                         context.data["target_func"] = profile.get_query(new_target)
@@ -200,14 +224,14 @@ def main():
         state_duration = state_end_time - state_start_time
         active_state.exit(context)
 
-        print(f"[BENCHMARK] {active_state.name} took {state_duration:.2f}s")
+        logger.info(f"[BENCHMARK] {active_state.name} took {state_duration:.2f}s")
         current_state_name = next_state_name
 
     total_duration = time.time() - total_start_time
-    print(f"\n[BENCHMARK] Total time: {total_duration:.2f}s")
-    print("Engine dropped to IDLE.")
+    logger.info(f"[BENCHMARK] Total time: {total_duration:.2f}s")
+    logger.info("Engine dropped to IDLE.")
     if context.data["errors"]:
-        print(f"Errors reported: {context.data['errors']}")
+        logger.error(f"Errors reported: {context.data['errors']}")
 
 
 if __name__ == "__main__":

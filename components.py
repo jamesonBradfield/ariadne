@@ -1,7 +1,5 @@
-import json
 import os
 import subprocess
-import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.error import URLError
 
@@ -211,16 +209,20 @@ class LiteLLMProvider:
         import litellm
 
         # 1. Prioritize passed args, then Env, then local defaults
-        self.base_url = base_url or os.getenv("ARIADNE_API_BASE") or "http://localhost:8080/v1"
-        
-        default_model = "openai/llama-cpp" if "localhost" in self.base_url else "ollama/llama3"
+        self.base_url = (
+            base_url or os.getenv("ARIADNE_API_BASE") or "http://localhost:8080/v1"
+        )
+
+        default_model = (
+            "openai/llama-cpp" if "localhost" in self.base_url else "ollama/llama3"
+        )
         self.model = model or os.getenv("ARIADNE_MODEL") or default_model
-        
+
         self.verbose = verbose
         if self.verbose:
             print(f"[LLM] Initialized with Model: {self.model}, Base: {self.base_url}")
             os.environ["LITELLM_LOG"] = "DEBUG"
-        
+
         self.api_key = os.getenv("ARIADNE_API_KEY") or "none"
 
     def generate(
@@ -233,8 +235,9 @@ class LiteLLMProvider:
         stop_at_newline: bool = False,
         max_retries: int = 5,
     ) -> str:
-        import litellm
         import time
+
+        import litellm
         from litellm.exceptions import ServiceUnavailableError
 
         messages = [
@@ -245,7 +248,9 @@ class LiteLLMProvider:
         for attempt in range(max_retries):
             try:
                 if self.verbose:
-                    print(f"[LLM] Sending request to {self.model} (stream={stream}, attempt={attempt+1})...")
+                    print(
+                        f"[LLM] Sending request to {self.model} (stream={stream}, attempt={attempt + 1})..."
+                    )
 
                 if stream:
                     response_iter = litellm.completion(
@@ -258,13 +263,16 @@ class LiteLLMProvider:
                         stop=stop_sequences,
                         stream=True,
                     )
-                    
+
                     full_content = ""
                     for chunk in response_iter:
                         content = chunk.choices[0].delta.content
                         if content:
                             full_content += content
-                            if stop_at_newline and ("\n" in full_content or len(full_content.strip().split()) > 5):
+                            if stop_at_newline and (
+                                "\n" in full_content
+                                or len(full_content.strip().split()) > 5
+                            ):
                                 break
                     return full_content.strip()
                 else:
@@ -282,12 +290,15 @@ class LiteLLMProvider:
             except ServiceUnavailableError as e:
                 if "Loading model" in str(e) and attempt < max_retries - 1:
                     wait_time = (attempt + 1) * 5
-                    print(f"[LLM] Server is still loading model. Retrying in {wait_time}s...")
+                    print(
+                        f"[LLM] Server is still loading model. Retrying in {wait_time}s..."
+                    )
                     time.sleep(wait_time)
                     continue
                 raise e
             except Exception as e:
-                if self.verbose: print(f"[LLM] Error: {e}")
+                if self.verbose:
+                    print(f"[LLM] Error: {e}")
                 return None
         return None
 
@@ -312,7 +323,7 @@ class CodingState(State):
 
         print(f"[{self.name}] Firing ECU (Streaming Code Generation)...")
         # Code generation might benefit from seeing the whole thing, but we stream to show progress
-        response = self.llm.generate(sys_prompt, usr_prompt, stream=False) 
+        response = self.llm.generate(sys_prompt, usr_prompt, stream=False)
 
         if not response:
             context.data["errors"].append("LLM generation failed.")
@@ -336,7 +347,7 @@ class Skeletonizer:
             language = tree_sitter.Language(profile.get_language_ptr())
             parser = tree_sitter.Parser(language)
             tree = parser.parse(source_code)
-            
+
             query = tree_sitter.Query(language, profile.get_skeleton_query())
             query_cursor = tree_sitter.QueryCursor(query)
             captures = query_cursor.captures(tree.root_node)
@@ -384,7 +395,7 @@ class SearchState(State):
         # Skeletonize using the new pure Python implementation
         print(f"[{self.name}] Skeletonizing {filepath} (Python)...")
         skeleton = Skeletonizer.skeletonize(filepath, profile)
-        
+
         if skeleton is None:
             # Fallback to raw if skeletonization fails
             try:
@@ -405,7 +416,13 @@ class SearchState(State):
         user_prompt = f"Intent: {intent}\n\nSkeleton of {filepath}:\n{skeleton}"
 
         print(f"[{self.name}] Querying LLM with skeletonized context...")
-        response = self.llm.generate(system_prompt, user_prompt, max_tokens=100, stream=True, stop_at_newline=True)
+        response = self.llm.generate(
+            system_prompt,
+            user_prompt,
+            max_tokens=100,
+            stream=True,
+            stop_at_newline=True,
+        )
 
         if not response:
             context.data["errors"].append("LLM generation failed in SEARCH.")
