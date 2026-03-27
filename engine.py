@@ -22,6 +22,30 @@ from profiles.python_profile import PythonProfile
 from parent_states import TRIAGE, DISPATCH, EVALUATE, SEARCH
 
 
+class IgnoreHandler:
+    """Handles .ariadneignore patterns."""
+    def __init__(self, ignore_file=".ariadneignore"):
+        self.patterns = []
+        if os.path.exists(ignore_file):
+            with open(ignore_file, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#"):
+                        self.patterns.append(line)
+
+    def is_ignored(self, path: str) -> bool:
+        import fnmatch
+        norm_path = os.path.normpath(path).replace(os.sep, "/")
+        for pattern in self.patterns:
+            # Directory ignore (e.g., .venv/)
+            if pattern.endswith("/") and (pattern.strip("/") + "/") in norm_path:
+                return True
+            # File/glob ignore (e.g., *.pyc)
+            if fnmatch.fnmatch(os.path.basename(path), pattern) or fnmatch.fnmatch(norm_path, pattern):
+                return True
+        return False
+
+
 class ProfileLoader:
     """
     Registry and loader for language profiles based on file extension.
@@ -46,28 +70,53 @@ class ProfileLoader:
         Takes a list of files or directories, detects the primary profile, 
         and expands all targets into a list of matching files.
         """
-        all_files = []
+        ignore_handler = IgnoreHandler()
+        
+        # Pass 1: Find the primary profile from the targets
         primary_profile = None
-
         for target in targets:
+            if ignore_handler.is_ignored(target):
+                continue
+
             if os.path.isfile(target):
-                all_files.append(target)
-                if not primary_profile:
-                    primary_profile = cls.get_profile_for_file(target)
+                primary_profile = cls.get_profile_for_file(target)
             elif os.path.isdir(target):
-                for root, _, files in os.walk(target):
+                for root, dirs, files in os.walk(target):
+                    # Prune ignored directories in-place for efficiency
+                    dirs[:] = [d for d in dirs if not ignore_handler.is_ignored(os.path.join(root, d))]
                     for f in files:
                         path = os.path.join(root, f)
-                        all_files.append(path)
-                        if not primary_profile:
-                            primary_profile = cls.get_profile_for_file(path)
+                        if ignore_handler.is_ignored(path):
+                            continue
+                        primary_profile = cls.get_profile_for_file(path)
+                        if primary_profile: break
+                    if primary_profile: break
+            if primary_profile: break
 
-        # Filter all discovered files by the primary profile's extensions
-        if primary_profile:
-            all_files = [
-                f for f in all_files 
-                if os.path.splitext(f)[1] in primary_profile.extensions
-            ]
+        if not primary_profile:
+            return None, []
+
+        # Pass 2: Expand all files matching that profile's extensions
+        all_files = []
+        valid_extensions = primary_profile.extensions
+        
+        for target in targets:
+            if ignore_handler.is_ignored(target):
+                continue
+
+            if os.path.isfile(target):
+                if os.path.splitext(target)[1] in valid_extensions:
+                    all_files.append(target)
+            elif os.path.isdir(target):
+                for root, dirs, files in os.walk(target):
+                    # Prune ignored directories
+                    dirs[:] = [d for d in dirs if not ignore_handler.is_ignored(os.path.join(root, d))]
+                    for f in files:
+                        path = os.path.join(root, f)
+                        if ignore_handler.is_ignored(path):
+                            continue
+                        if os.path.splitext(path)[1] in valid_extensions:
+                            all_files.append(path)
 
         return primary_profile, list(set(all_files))
 
@@ -84,6 +133,9 @@ class SenseState(State):
     def tick(self, job: JobPayload) -> Tuple[str, Any]:
         if not hasattr(job, "current_file_index"):
             job.current_file_index = 0
+
+        # Reset node state for this file attempt to prevent bleeding
+        job.extracted_node = None
 
         if job.current_file_index >= len(job.target_files):
             return "SUCCESS", job
@@ -121,15 +173,20 @@ class CodingState(State):
             node_data.get("node_string", ""), 
             job.intent
         )
+
+        # Append feedback if this is a retry
+        if job.llm_feedback:
+            user += f"\n\nPREVIOUS ERROR: {job.llm_feedback}\nPlease fix this and return ONLY the raw code."
         
         raw_payload = self.llm.generate(system, user)
-        # Surgical cleaning of markdown blocks
-        clean_payload = raw_payload.strip()
-        if clean_payload.startswith("```"):
-            lines = clean_payload.splitlines()
-            if len(lines) >= 2 and lines[0].startswith("```"):
-                # Remove first line (backticks + optional lang) and last line (backticks)
-                clean_payload = "\n".join(lines[1:-1]).strip()
+        
+        # Surgical cleaning of markdown blocks using regex
+        import re
+        code_block_match = re.search(r"```(?:\w+)?\n(.*?)\n```", raw_payload, re.DOTALL)
+        if code_block_match:
+            clean_payload = code_block_match.group(1).strip()
+        else:
+            clean_payload = raw_payload.strip().replace("```", "")
         
         job.llm_payload = clean_payload
         return "SYNTAX_GATE", job
@@ -144,10 +201,12 @@ class SyntaxGateState(State):
         logger.info(f"[{self.name}] Validating surgical AST...")
         result = self.gate.validate(job.llm_payload)
         if result["valid"]:
+            job.llm_feedback = "" # Clear feedback on success
             return "ACTUATE", job
         
-        logger.error(f"[{self.name}] Syntax validation failed!")
-        return "ABORT", job
+        logger.error(f"[{self.name}] Syntax validation failed: {result['error_message']}")
+        job.llm_feedback = f"Syntax error or illegal markdown: {result['error_message']}"
+        return "CODING", job
 
 
 class ActuateState(State):

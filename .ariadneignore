@@ -1,0 +1,15 @@
+.git/
+.venv/
+__pycache__/
+target/
+node_modules/
+build/
+dist/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.dll
+*.exe
+*.bin
+.DS_Store

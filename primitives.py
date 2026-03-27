@@ -33,6 +33,7 @@ class ExtractAST(State):
         capture_name = payload.get("capture_name", "node")
 
         if not filepath or not query_string:
+            logger.warning(f"ExtractAST skipped: Missing filepath ({filepath}) or query_string ({query_string})")
             return "ERROR", []
 
         try:

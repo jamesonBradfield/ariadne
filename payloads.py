@@ -16,4 +16,5 @@ class JobPayload:
     target_files: List[str] = field(default_factory=list)
     extracted_context: List[str] = field(default_factory=list)
     test_stdout: str = ""
+    llm_feedback: str = ""
     retry_count: int = 0
