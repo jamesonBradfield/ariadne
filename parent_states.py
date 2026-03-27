@@ -72,11 +72,12 @@ class DISPATCH(State):
             status, skeletons = self.extractor.tick({
                 "filepath": filepath,
                 "query_string": self.skeleton_query,
-                "capture_name": "node"
+                "capture_name": "func"
             })
             all_skeletons.extend(skeletons)
         
         skeleton_context = "\n".join(all_skeletons)
+        logger.debug(f"[DISPATCH] Skeleton Context (API Surface):\n{skeleton_context}")
         
         # 2. Generate Test
         system_prompt = (
@@ -150,7 +151,7 @@ class SEARCH(State):
             status, skeletons = self.extractor.tick({
                 "filepath": filepath,
                 "query_string": self.skeleton_query,
-                "capture_name": "node"
+                "capture_name": "func"
             })
             all_skeletons.extend(skeletons)
             

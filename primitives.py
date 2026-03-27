@@ -46,19 +46,26 @@ class ExtractAST(State):
             query_cursor = tree_sitter.QueryCursor(query)
 
             results = []  # Initialize results list
-            # captures is an iterator of (node, name_str) tuples
-            for capture_item in query_cursor.captures(tree.root_node):
-                # Check if it's a tuple of length 2 before unpacking
-                if isinstance(capture_item, tuple) and len(capture_item) == 2:
-                    node, name = capture_item
-                    if name == capture_name:
+            # Some tree-sitter versions return a dict of {name: [nodes]}
+            # Others return a list of (node, name) tuples.
+            captures = query_cursor.captures(tree.root_node)
+            
+            if isinstance(captures, dict):
+                # Dict-based captures (newer API)
+                if capture_name in captures:
+                    for node in captures[capture_name]:
                         results.append(
                             source_code[node.start_byte : node.end_byte].decode("utf-8")
                         )
-                else:
-                    logger.warning(
-                        f"Skipping malformed capture item in ExtractAST: {capture_item}"
-                    )
+            else:
+                # Tuple-based captures (older/standard API)
+                for capture_item in captures:
+                    if isinstance(capture_item, tuple) and len(capture_item) == 2:
+                        node, name = capture_item
+                        if name == capture_name:
+                            results.append(
+                                source_code[node.start_byte : node.end_byte].decode("utf-8")
+                            )
 
             return "SUCCESS" if results else "NOT_FOUND", results
         except Exception as e:

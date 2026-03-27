@@ -247,9 +247,8 @@ class LiteLLMProvider:
             {"role": "user", "content": user_prompt},
         ]
 
-        if self.verbose:
-            logger.info(f"[LLM] System Prompt: {system_prompt}")
-            logger.info(f"[LLM] User Prompt: {user_prompt}")
+        logger.debug(f"[LLM REQUEST] System: {system_prompt}")
+        logger.debug(f"[LLM REQUEST] User: {user_prompt}")
 
         for attempt in range(max_retries):
             try:
@@ -280,6 +279,7 @@ class LiteLLMProvider:
                                 or len(full_content.strip().split()) > 5
                             ):
                                 break
+                    logger.debug(f"[LLM RESPONSE] Raw (Streamed): {full_content}")
                     return full_content.strip()
                 else:
                     response = litellm.completion(
@@ -291,7 +291,9 @@ class LiteLLMProvider:
                         api_key=self.api_key,
                         stop=stop_sequences,
                     )
-                    return response.choices[0].message.content.strip()
+                    raw_content = response.choices[0].message.content
+                    logger.debug(f"[LLM RESPONSE] Raw: {raw_content}")
+                    return raw_content.strip()
 
             except ServiceUnavailableError as e:
                 if "Loading model" in str(e) and attempt < max_retries - 1:
