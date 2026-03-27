@@ -115,15 +115,13 @@ class SyntaxGate:
         self.parser = tree_sitter.Parser(self.language)
 
     def validate(self, code_string: str) -> Dict[str, Any]:
-        """
-        Validate that a string is valid Rust code by attempting to parse it.
-
-        Args:
-            code_string: The Rust code string to validate
-
-        Returns:
-            Dictionary with keys: valid (bool), error_message (str or None)
-        """
+        if "```" in code_string:
+            return {
+                "valid": False,
+                "error_message": "Code contains markdown backticks (LLM leak)",
+                "parsed_tree": None,
+            }
+        
         try:
             # Parse the code string
             tree = self.parser.parse(bytes(code_string, "utf8"))
@@ -167,6 +165,10 @@ class DriveByWireActuator:
         end_byte: int,
         new_payload: str,
     ) -> bool:
+        if "```" in new_payload:
+            logger.error("Refusing to splice payload containing backticks (LLM leak).")
+            return False
+
         try:
             new_payload_bytes = new_payload.encode("utf8")
 

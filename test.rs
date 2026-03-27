@@ -1,4 +1,3 @@
-```rust
 // main.rs
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -18,20 +17,21 @@ impl Entity {
     }
 
     fn take_damage(&mut self, damage: f32) {
-        let mitigation = if damage > 50.0 {
-            (self.armor / 100.0) * damage * 0.2
-        } else {
-            0.0
-        };
-        let effective_damage = damage - mitigation;
+    let mitigation = if damage > 50.0 {
+        (self.armor as f32 / 100.0) * damage * 0.2
+    } else {
+        0.0
+    };
+    let effective_damage = damage - mitigation;
 
-        self.health -= effective_damage;
-        self.is_dead = self.health <= 0.0;
+    self.health -= effective_damage;
 
-        if self.is_dead {
-            println!("Critical: Entity has died!");
-        }
+    self.is_dead = self.health <= 0.0;
+
+    if self.is_dead {
+        println!("Critical: Entity has died!");
     }
+}
 
     fn is_alive(&self) -> bool {
         !self.is_dead
@@ -73,17 +73,3 @@ fn main() {
         }
     }
 }
-```
-
-```toml
-[package]
-name = "damage_reduction"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-
-[[bin]]
-name = "main"
-path = "src/main.rs"
-```
