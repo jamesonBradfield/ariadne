@@ -142,7 +142,10 @@ class SenseState(State):
 
     def tick(self, job: JobPayload) -> Tuple[str, Any]:
         if job.current_file_index >= len(job.target_files):
-            return "SUCCESS", job
+            # If we reached the end and still haven't found anything to code, 
+            # and we just came from another SENSE tick, it's a failure.
+            logger.error(f"[{self.name}] Exhausted all files without finding any target symbols.")
+            return "ABORT", job
 
         filepath = job.target_files[job.current_file_index]
         job.extracted_nodes = []

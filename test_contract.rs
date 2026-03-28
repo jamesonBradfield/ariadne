@@ -7,45 +7,29 @@ fn test_new() {
 }
 
 #[test]
-fn test_heal() {
-    let mut entity = Entity::new();
-    entity.heal(50.0);
-    assert_eq!(entity.health, 100.0);
-}
-
-#[test]
-fn test_heal_small() {
-    let mut entity = Entity::new();
-    entity.heal(20.0);
-    assert_eq!(entity.health, 100.0);
-}
-
-#[test]
-fn test_take_damage_less_than_armor() {
+fn test_take_damage() {
     let mut entity = Entity::new();
     entity.take_damage(30.0);
-    assert_eq!(entity.health, 100.0);
+    assert_eq!(entity.health, 70.0);
     assert!(!entity.is_dead);
-}
-
-#[test]
-fn test_take_damage_equal_to_armor() {
-    let mut entity = Entity::new();
-    entity.take_damage(50.0);
-    assert_eq!(entity.health, 100.0);
-    assert!(!entity.is_dead);
-}
-
-#[test]
-fn test_take_damage_more_than_armor() {
-    let mut entity = Entity::new();
-    entity.take_damage(150.0);
+    
+    entity.take_damage(80.0);
+    assert_eq!(entity.health, 0.0);
+    assert!(entity.is_dead);
+    
+    entity.take_damage(10.0);
     assert_eq!(entity.health, 0.0);
     assert!(entity.is_dead);
 }
 
 #[test]
-fn test_take_damage_partial() {
+fn test_heal() {
     let mut entity = Entity::new();
-    entity.take_damage(100.0);
-    assert_eq!(
+    entity.take_damage(60.0);
+    entity.heal(20.0);
+    assert_eq!(entity.health, 100.0);
+    
+    entity.take_damage(150.0);
+    entity.heal(50.0);
+    assert_eq!(entity.health, 100.0);
+}

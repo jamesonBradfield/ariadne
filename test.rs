@@ -17,17 +17,17 @@ impl Entity {
     }
 
     pub fn take_damage(&mut self, damage: f32) {
-    let damage_after_reduction = damage - self.armor;
-    self.health -= damage_after_reduction.max(0.0);
-    self.is_dead = self.health <= 0.0;
-}
+        let damage_after_reduction = damage - self.armor;
+        self.health -= damage_after_reduction.max(0.0);
+        self.is_dead = self.health <= 0.0;
+    }
 
     pub fn heal(&mut self, amount: f32) {
-    self.health += amount;
-    if self.health > self.max_health {
-        self.health = self.max_health;
+        self.health += amount;
+        if self.health > self.max_health {
+            self.health = self.max_health;
+        }
     }
-}
 }
 
 fn main() {

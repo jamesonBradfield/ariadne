@@ -22,11 +22,17 @@ class RustProfile(LanguageProfile):
 
     def get_query(self, symbol_name: str) -> str:
         """
-        Construct a tree-sitter query to find a function item by name.
+        Construct a tree-sitter query to find a named item (function, struct, etc.).
         """
-        return (
-            f'(function_item name: (identifier) @func_name (#eq? @func_name "{symbol_name}")) @function'
-        )
+        return f"""
+        [
+          (function_item name: (identifier) @symbol_name (#eq? @symbol_name "{symbol_name}"))
+          (struct_item name: (type_identifier) @symbol_name (#eq? @symbol_name "{symbol_name}"))
+          (enum_item name: (type_identifier) @symbol_name (#eq? @symbol_name "{symbol_name}"))
+          (trait_item name: (type_identifier) @symbol_name (#eq? @symbol_name "{symbol_name}"))
+          (type_item name: (type_identifier) @symbol_name (#eq? @symbol_name "{symbol_name}"))
+        ] @node
+        """
 
     def get_skeleton_query(self) -> str:
         """
@@ -67,7 +73,7 @@ class RustProfile(LanguageProfile):
 
     @property
     def target_capture_name(self) -> str:
-        return "function"
+        return "node"
 
     @property
     def coding_example(self) -> str:

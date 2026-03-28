@@ -22,11 +22,14 @@ class PythonProfile(LanguageProfile):
 
     def get_query(self, symbol_name: str) -> str:
         """
-        Construct a tree-sitter query to find a function definition by name.
+        Construct a tree-sitter query to find a named item (function, class, etc.).
         """
-        return (
-            f'(function_definition name: (identifier) @func_name (#eq? @func_name "{symbol_name}")) @function'
-        )
+        return f"""
+        [
+          (function_definition name: (identifier) @symbol_name (#eq? @symbol_name "{symbol_name}"))
+          (class_definition name: (identifier) @symbol_name (#eq? @symbol_name "{symbol_name}"))
+        ] @node
+        """
 
     def get_skeleton_query(self) -> str:
         """
@@ -65,7 +68,7 @@ class PythonProfile(LanguageProfile):
 
     @property
     def target_capture_name(self) -> str:
-        return "function"
+        return "node"
 
     @property
     def coding_example(self) -> str:
