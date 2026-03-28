@@ -223,7 +223,11 @@ class LiteLLMProvider:
             "openai/llama-cpp" if "localhost" in self.base_url else "ollama/llama3"
         )
         self.model = model or os.getenv("ARIADNE_MODEL") or default_model
-
+        
+        # Ensure openai/ prefix if hitting localhost to trigger OpenAI provider in litellm
+        if "localhost" in self.base_url and not self.model.startswith("openai/"):
+            self.model = f"openai/{self.model}"
+        
         self.verbose = verbose
         if self.verbose:
             logger.info(
@@ -257,17 +261,21 @@ class LiteLLMProvider:
                         f"[LLM] Sending request to {self.model} (stream={stream}, attempt={attempt + 1})..."
                     )
 
+                # Prepare arguments
+                completion_args = {
+                    "model": self.model,
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                    "temperature": 0.1,
+                    "api_base": self.base_url,
+                    "stop": stop_sequences,
+                }
+                if self.api_key:
+                    completion_args["api_key"] = self.api_key
+
                 if stream:
-                    response_iter = litellm.completion(
-                        model=self.model,
-                        messages=messages,
-                        max_tokens=max_tokens,
-                        temperature=0.1,
-                        api_base=self.base_url,
-                        api_key=self.api_key,
-                        stop=stop_sequences,
-                        stream=True,
-                    )
+                    completion_args["stream"] = True
+                    response_iter = litellm.completion(**completion_args)
 
                     full_content = ""
                     for chunk in response_iter:
@@ -282,15 +290,7 @@ class LiteLLMProvider:
                     logger.debug(f"[LLM RESPONSE] Raw (Streamed): {full_content}")
                     return full_content.strip()
                 else:
-                    response = litellm.completion(
-                        model=self.model,
-                        messages=messages,
-                        max_tokens=max_tokens,
-                        temperature=0.1,
-                        api_base=self.base_url,
-                        api_key=self.api_key,
-                        stop=stop_sequences,
-                    )
+                    response = litellm.completion(**completion_args)
                     raw_content = response.choices[0].message.content
                     logger.debug(f"[LLM RESPONSE] Raw: {raw_content}")
                     return raw_content.strip()

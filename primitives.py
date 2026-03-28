@@ -81,11 +81,24 @@ class QueryLLM(State):
     """
 
     def __init__(self, model: Optional[str] = None, api_base: Optional[str] = None):
-        super().__init__("QUERY_LLM")
         import os
+        super().__init__("QUERY_LLM")
 
-        self.model = model or os.getenv("ARIADNE_MODEL") or "ollama/llama3"
-        self.api_base = api_base or os.getenv("ARIADNE_API_BASE")
+        # 1. Prioritize passed args, then Env, then local defaults
+        self.api_base = (
+            api_base or os.getenv("ARIADNE_API_BASE") or "http://localhost:8080/v1"
+        )
+
+        default_model = (
+            "openai/llama-cpp" if "localhost" in self.api_base else "ollama/llama3"
+        )
+        self.model = model or os.getenv("ARIADNE_MODEL") or default_model
+        
+        # Ensure openai/ prefix if hitting localhost to trigger OpenAI provider in litellm
+        if "localhost" in self.api_base and not self.model.startswith("openai/"):
+            self.model = f"openai/{self.model}"
+
+        # Only use API key if provided, otherwise 'none' for local servers
         self.api_key = os.getenv("ARIADNE_API_KEY") or "none"
 
     def tick(self, payload: Dict[str, Any]) -> Tuple[str, Any]:
@@ -101,14 +114,19 @@ class QueryLLM(State):
         ]
 
         try:
-            response = litellm.completion(
-                model=self.model,
-                messages=messages,
-                api_base=self.api_base,
-                api_key=self.api_key,
-                response_format={"type": "json_object"} if schema else None,
-                temperature=0.0,
-            )
+            # Prepare arguments, omitting None values
+            completion_args = {
+                "model": self.model,
+                "messages": messages,
+                "api_base": self.api_base,
+                "temperature": 0.0,
+            }
+            if self.api_key:
+                completion_args["api_key"] = self.api_key
+            if schema:
+                completion_args["response_format"] = {"type": "json_object"}
+
+            response = litellm.completion(**completion_args)
             content = response.choices[0].message.content
 
             if schema:
@@ -189,4 +207,41 @@ class WriteFile(State):
             return "SUCCESS", filepath
         except Exception as e:
             logger.error(f"WriteFile Error: {e}")
+            return "ERROR", str(e)
+
+
+class ASTSplice(State):
+    """
+    Surgical AST-based splicing primitive.
+    Input Payload: Dict with 'filepath', 'full_source' (bytes), 'start_byte', 'end_byte', and 'new_code' (str).
+    Returns: Tuple[str, str] (status, filepath)
+    """
+
+    def __init__(self):
+        super().__init__("AST_SPLICE")
+
+    def tick(self, payload: Dict[str, Any]) -> Tuple[str, str]:
+        filepath = payload.get("filepath")
+        full_source = payload.get("full_source")
+        start_byte = payload.get("start_byte")
+        end_byte = payload.get("end_byte")
+        new_code = payload.get("new_code")
+
+        if "```" in new_code:
+            logger.error("ASTSplice rejected: Code contains markdown backticks.")
+            return "REJECTED", "Markdown detected"
+
+        try:
+            new_code_bytes = new_code.encode("utf-8")
+            before = full_source[:start_byte]
+            after = full_source[end_byte:]
+
+            new_source_code = before + new_code_bytes + after
+
+            with open(filepath, "wb") as f:
+                f.write(new_source_code)
+
+            return "SUCCESS", filepath
+        except Exception as e:
+            logger.error(f"ASTSplice Error: {e}")
             return "ERROR", str(e)
