@@ -34,6 +34,22 @@ class RustProfile(LanguageProfile):
         """
         return "(function_item body: (block) @body) @func"
 
+    @property
+    def skeleton_capture_name(self) -> str:
+        return "func"
+
+    @property
+    def test_generation_system_prompt(self) -> str:
+        return (
+            "You are a Rust testing expert. Your sole task is to generate isolated Rust unit tests.\n"
+            "The code provided in the context (`Context API Surface`) defines the available structs and functions.\n"
+            "Your output MUST contain ONLY `#[test]` functions.\n"
+            "DO NOT include any `struct` definitions.\n"
+            "DO NOT include any `impl` blocks for methods.\n"
+            "DO NOT include any `use` statements unless they are part of the test function itself.\n"
+            "Output RAW RUST CODE ONLY. No markdown, no explanations."
+        )
+
     def parse_search_result(self, response: str) -> Optional[str]:
         """
         Parse the LLM's raw response to extract the function/item name.

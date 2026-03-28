@@ -214,7 +214,11 @@ class ActuateState(State):
         super().__init__("ACTUATE")
 
     def tick(self, job: JobPayload) -> Tuple[str, Any]:
-        node_data = getattr(job, "extracted_node", {})
+        node_data = getattr(job, "extracted_node", None)
+        if not node_data or "full_source" not in node_data:
+            logger.error(f"[{self.name}] No surgical target acquired! Aborting splice.")
+            return "ABORT", job
+
         filepath = job.target_files[job.current_file_index]
         
         logger.info(f"[{self.name}] Splicing {filepath} via Drive-by-Wire")
@@ -302,17 +306,16 @@ def main():
         "DISPATCH": DISPATCH(
             model_info, 
             test_filepath=f"test_contract{profile.extensions[0]}", 
-            language_ptr=profile.get_language_ptr(),
-            skeleton_query=profile.get_skeleton_query(),
+            profile=profile,
             target_files=target_files
         ),
         "EVALUATE": EVALUATE(test_command=" ".join(profile.check_command)),
-        "SEARCH": SearchState(
+        "SEARCH": SEARCH(
             model_info, 
-            profile.get_language_ptr(), 
-            skeleton_query=profile.get_skeleton_query(),
+            profile=profile, 
             node_query_template=profile.get_query("{node_name}")
         ),
+
         "SENSE": SenseState(profile),
         "CODING": CodingState(model_info, profile),
         "SYNTAX_GATE": SyntaxGateState(profile),

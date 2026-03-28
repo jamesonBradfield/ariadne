@@ -34,6 +34,20 @@ class PythonProfile(LanguageProfile):
         """
         return "(function_definition body: (block) @body) @func"
 
+    @property
+    def skeleton_capture_name(self) -> str:
+        return "func"
+
+    @property
+    def test_generation_system_prompt(self) -> str:
+        return (
+            "You are a Python testing expert. Your sole task is to generate isolated Python unit tests using `pytest` or `unittest`.\n"
+            "The code provided in the context (`Context API Surface`) defines the available classes and functions.\n"
+            "Your output MUST contain ONLY test functions or classes.\n"
+            "DO NOT include any of the original implementation code.\n"
+            "Output RAW PYTHON CODE ONLY. No markdown, no explanations."
+        )
+
     def parse_search_result(self, response: str) -> Optional[str]:
         """
         Parse the LLM's raw response to extract the function/item name.

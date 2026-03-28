@@ -46,12 +46,13 @@ class DISPATCH(State):
     """
     Creates JobPayload, generates a test, and gets user approval.
     """
-    def __init__(self, model_info: Dict[str, Any], test_filepath: str, language_ptr: Any, skeleton_query: str, target_files: List[str] = None):
+    def __init__(self, model_info: Dict[str, Any], test_filepath: str, profile: Any, target_files: List[str] = None):
         super().__init__("DISPATCH")
         self.test_filepath = test_filepath
         self.target_files = target_files or []
-        self.extractor = ExtractAST(language_ptr)
-        self.skeleton_query = skeleton_query
+        self.profile = profile
+        self.extractor = ExtractAST(profile.get_language_ptr())
+        self.skeleton_query = profile.get_skeleton_query()
         self.query_llm = QueryLLM(model=model_info.get("model"), api_base=model_info.get("api_base"))
         self.prompt_user = PromptUser()
         self.write_file = WriteFile()
@@ -72,7 +73,7 @@ class DISPATCH(State):
             status, skeletons = self.extractor.tick({
                 "filepath": filepath,
                 "query_string": self.skeleton_query,
-                "capture_name": "func"
+                "capture_name": self.profile.skeleton_capture_name
             })
             all_skeletons.extend(skeletons)
         
@@ -80,16 +81,8 @@ class DISPATCH(State):
         logger.debug(f"[DISPATCH] Skeleton Context (API Surface):\n{skeleton_context}")
         
         # 2. Generate Test
-        system_prompt = (
-            "You are a Rust testing expert. Your sole task is to generate isolated Rust unit tests.\n"
-            "The code provided in the context (`Context API Surface`) defines the available structs and functions.\n"
-            "Your output MUST contain ONLY `#[test]` functions.\n"
-            "DO NOT include any `struct` definitions.\n"
-            "DO NOT include any `impl` blocks for methods.\n"
-            "DO NOT include any `use` statements unless they are part of the test function itself.\n"
-            "Output RAW RUST CODE ONLY. No markdown, no explanations."
-        )
-        user_prompt = f"Intent: {intent}\n\nRust API Surface:\n{skeleton_context}"
+        system_prompt = self.profile.test_generation_system_prompt
+        user_prompt = f"Intent: {intent}\n\n{self.profile.name} API Surface:\n{skeleton_context}"
         
         status, test_code = self.query_llm.tick({
             "system": system_prompt,
@@ -137,11 +130,12 @@ class SEARCH(State):
     """
     Identifies and extracts relevant code context.
     """
-    def __init__(self, model_info: Dict[str, Any], language_ptr: Any, skeleton_query: str, node_query_template: str):
+    def __init__(self, model_info: Dict[str, Any], profile: Any, node_query_template: str):
         super().__init__("SEARCH")
-        self.extractor = ExtractAST(language_ptr)
+        self.profile = profile
+        self.extractor = ExtractAST(profile.get_language_ptr())
         self.query_llm = QueryLLM(model=model_info.get("model"), api_base=model_info.get("api_base"))
-        self.skeleton_query = skeleton_query
+        self.skeleton_query = profile.get_skeleton_query()
         self.node_query_template = node_query_template
 
     def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
@@ -151,7 +145,7 @@ class SEARCH(State):
             status, skeletons = self.extractor.tick({
                 "filepath": filepath,
                 "query_string": self.skeleton_query,
-                "capture_name": "func"
+                "capture_name": self.profile.skeleton_capture_name
             })
             all_skeletons.extend(skeletons)
             

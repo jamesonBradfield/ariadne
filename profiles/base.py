@@ -35,6 +35,18 @@ class LanguageProfile(ABC):
         """Return the Tree-sitter query string to find bodies to strip for skeletonization."""
         pass
 
+    @property
+    @abstractmethod
+    def skeleton_capture_name(self) -> str:
+        """The Tree-sitter capture name for skeletonized functions (e.g., 'func')."""
+        pass
+
+    @property
+    @abstractmethod
+    def test_generation_system_prompt(self) -> str:
+        """The system prompt for generating language-specific unit tests."""
+        pass
+
     @abstractmethod
     def parse_search_result(self, response: str) -> Optional[str]:
         """
