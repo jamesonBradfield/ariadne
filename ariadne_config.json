@@ -1,0 +1,33 @@
+{
+  "default": {
+    "model": "openai/llama-cpp",
+    "api_base": "http://localhost:8080/v1",
+    "api_key": "none",
+    "params": {
+      "temperature": 0.0,
+      "max_tokens": 4096
+    }
+  },
+  "states": {
+    "TRIAGE": {
+      "system_prompt": "You are a triage agent. Extract the core technical intent from the user request. Output ONLY the intent.",
+      "user_prompt_template": "{{input}}",
+      "params": { "max_tokens": 100 }
+    },
+    "DISPATCH": {
+      "system_prompt": "You are a {{language}} testing expert. Your sole task is to generate isolated unit tests.\nThe code provided in the context defines the available API surface.\nYour output MUST contain ONLY test functions.\nDO NOT include original implementations.\nOutput RAW CODE ONLY. No markdown, no explanations.",
+      "user_prompt_template": "Intent: {{intent}}\n\n{{language}} API Surface:\n{{skeleton_context}}",
+      "post_process": "strip_markdown"
+    },
+    "SEARCH": {
+      "system_prompt": "You are a {{language}} architect. Analyze the test error and the project skeletons. Identify the specific function, struct, or impl block names that need to be modified or inspected. Return a JSON object with a 'nodes' array of strings.",
+      "user_prompt_template": "Error: {{test_stdout}}\nSkeletons: {{skeletons}}",
+      "post_process": "extract_json"
+    },
+    "CODING": {
+      "system_prompt": "You are an expert {{language}} developer and an automated surgical execution engine.\nYou MUST output ONLY a SINGLE valid JSON object. No markdown formatting, no conversational text, no explanations, and NO trailing commas.\nThe JSON object MUST contain exactly one key called 'edits', which is an array of objects.\nEach object in the array MUST contain 'symbol' and 'new_code'.\nExample Expected Output:\n{{coding_example}}",
+      "user_prompt_template": "Rewrite this code to fulfill the following intent: {{intent}}\n\n{{error_context}}\n\nCode to rewrite:\n{{context_str}}",
+      "post_process": "extract_json"
+    }
+  }
+}
