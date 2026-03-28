@@ -1,142 +1,82 @@
+import argparse
 import logging
 import os
-from typing import Optional, Tuple, Any, List
+from typing import Any, Dict, List, Optional, Tuple
 
-from components import (
-    CodingState,
-    DriveByWireActuator,
-    ECUPromptCompiler,
-    LiteLLMProvider,
-    SearchState,
-    SyntaxGate,
-    TreeSitterSensor,
-)
-
-# This creates a logger named 'core' that other files can import
-logger = logging.getLogger("ariadne.core")
-from core import State
-from payloads import JobPayload, ContextPayload
-from profiles.base import LanguageProfile
-from profiles.rust_profile import RustProfile
-from profiles.python_profile import PythonProfile
+from core import EngineContext, State
+from payloads import JobPayload
+from primitives import ExtractAST, QueryLLM, ExecuteCommand, PromptUser, WriteFile, ASTSplice
 from parent_states import TRIAGE, DISPATCH, EVALUATE, SEARCH
+from components import LiteLLMProvider, TreeSitterSensor, SyntaxGate
 
-
-class IgnoreHandler:
-    """Handles .ariadneignore patterns."""
-    def __init__(self, ignore_file=".ariadneignore"):
-        self.patterns = []
-        if os.path.exists(ignore_file):
-            with open(ignore_file, "r") as f:
-                for line in f:
-                    line = line.strip()
-                    if line and not line.startswith("#"):
-                        self.patterns.append(line)
-
-    def is_ignored(self, path: str) -> bool:
-        import fnmatch
-        norm_path = os.path.normpath(path).replace(os.sep, "/")
-        for pattern in self.patterns:
-            # Directory ignore (e.g., .venv/)
-            if pattern.endswith("/") and (pattern.strip("/") + "/") in norm_path:
-                return True
-            # File/glob ignore (e.g., *.pyc)
-            if fnmatch.fnmatch(os.path.basename(path), pattern) or fnmatch.fnmatch(norm_path, pattern):
-                return True
-        return False
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("ariadne.core")
 
 
 class ProfileLoader:
     """
-    Registry and loader for language profiles based on file extension.
+    Handles loading language profiles and expanding target lists.
     """
+    @staticmethod
+    def load_profile(name: str):
+        if name.lower() == "rust":
+            from profiles.rust_profile import RustProfile
+            return RustProfile()
+        elif name.lower() == "python":
+            from profiles.python_profile import PythonProfile
+            return PythonProfile()
+        else:
+            raise ValueError(f"Unsupported profile: {name}")
 
-    _profiles = [
-        RustProfile(),
-        PythonProfile(),
-    ]
-
-    @classmethod
-    def get_profile_for_file(cls, filepath: str) -> Optional[LanguageProfile]:
-        _, ext = os.path.splitext(filepath)
-        for profile in cls._profiles:
-            if ext in profile.extensions:
-                return profile
-        return None
-
-    @classmethod
-    def expand_targets(cls, targets: List[str]) -> Tuple[Optional[LanguageProfile], List[str]]:
-        """
-        Takes a list of files or directories, detects the primary profile, 
-        and expands all targets into a list of matching files.
-        """
+    @staticmethod
+    def expand_targets(targets: List[str], profile) -> List[str]:
+        expanded = []
         ignore_handler = IgnoreHandler()
-        
-        # Pass 1: Find the primary profile from the targets
-        primary_profile = None
-        for target in targets:
-            if ignore_handler.is_ignored(target):
-                continue
-
-            if os.path.isfile(target):
-                primary_profile = cls.get_profile_for_file(target)
-            elif os.path.isdir(target):
-                for root, dirs, files in os.walk(target):
-                    # Prune ignored directories in-place for efficiency
+        for t in targets:
+            if os.path.isfile(t):
+                expanded.append(t)
+            elif os.path.isdir(t):
+                for root, dirs, files in os.walk(t):
+                    # Prune ignored directories in-place
                     dirs[:] = [d for d in dirs if not ignore_handler.is_ignored(os.path.join(root, d))]
+                    
                     for f in files:
-                        path = os.path.join(root, f)
-                        if ignore_handler.is_ignored(path):
-                            continue
-                        primary_profile = cls.get_profile_for_file(path)
-                        if primary_profile: break
-                    if primary_profile: break
-            if primary_profile: break
-
-        if not primary_profile:
-            return None, []
-
-        # Pass 2: Expand all files matching that profile's extensions
-        all_files = []
-        valid_extensions = primary_profile.extensions
-        
-        for target in targets:
-            if ignore_handler.is_ignored(target):
-                continue
-
-            if os.path.isfile(target):
-                if os.path.splitext(target)[1] in valid_extensions:
-                    all_files.append(target)
-            elif os.path.isdir(target):
-                for root, dirs, files in os.walk(target):
-                    # Prune ignored directories
-                    dirs[:] = [d for d in dirs if not ignore_handler.is_ignored(os.path.join(root, d))]
-                    for f in files:
-                        path = os.path.join(root, f)
-                        if ignore_handler.is_ignored(path):
-                            continue
-                        if os.path.splitext(path)[1] in valid_extensions:
-                            all_files.append(path)
-
-        return primary_profile, list(set(all_files))
+                        full_path = os.path.join(root, f)
+                        if any(full_path.endswith(ext) for ext in profile.extensions):
+                            if not ignore_handler.is_ignored(full_path):
+                                expanded.append(full_path)
+        return expanded
 
 
-# --- SURGICAL STATES ---
+class IgnoreHandler:
+    """
+    Handles .ariadneignore and .gitignore logic.
+    """
+    def __init__(self):
+        self.ignore_patterns = [".venv", "target", ".git", "__pycache__", ".ruff_cache"]
+        if os.path.exists(".ariadneignore"):
+            with open(".ariadneignore", "r") as f:
+                self.ignore_patterns.extend([line.strip() for line in f if line.strip() and not line.startswith("#")])
+
+    def is_ignored(self, path: str) -> bool:
+        return any(pattern in path for pattern in self.ignore_patterns)
 
 
 class SenseState(State):
-    def __init__(self, profile: LanguageProfile):
+    """
+    Acquires the exact AST coordinates for a target symbol.
+    """
+    def __init__(self, profile):
         super().__init__("SENSE")
         self.profile = profile
         self.sensor = TreeSitterSensor(profile.get_language_ptr())
 
     def tick(self, job: JobPayload) -> Tuple[str, Any]:
-        if not hasattr(job, "current_file_index"):
-            job.current_file_index = 0
-
-        # Reset node state for this file attempt to prevent bleeding
-        job.extracted_node = None
-
         if job.current_file_index >= len(job.target_files):
             return "SUCCESS", job
 
@@ -159,49 +99,62 @@ class SenseState(State):
 
 
 class CodingState(State):
-    def __init__(self, model_info: dict, profile: LanguageProfile):
+    """
+    Uses LLM to rewrite the acquired AST node.
+    """
+    def __init__(self, model_info: Dict[str, Any], profile: Any):
         super().__init__("CODING")
+        self.llm = LiteLLMProvider(
+            model=model_info.get("model"), 
+            base_url=model_info.get("api_base"),
+            verbose=True
+        )
         self.profile = profile
-        self.llm = LiteLLMProvider(model=model_info["model"], base_url=model_info["api_base"])
 
     def tick(self, job: JobPayload) -> Tuple[str, Any]:
-        node_data = getattr(job, "extracted_node", {})
+        node_data = job.extracted_node
+        if not node_data:
+            return "SENSE", job
+
         logger.info(f"[{self.name}] --- AMNESIC TICK: Fresh LLM Context for {job.target_files[job.current_file_index]} ---")
         
-        system, user = ECUPromptCompiler.compile(
-            self.profile.name, 
-            node_data.get("node_string", ""), 
-            job.intent
+        system_prompt = (
+            f"You are an expert {self.profile.name} developer. You act as an execution engine. "
+            f"You only output raw, valid {self.profile.name} code. NO markdown formatting. "
+            f"NO backticks. NO conversational text or explanations."
         )
-
-        # Append feedback if this is a retry
+        
+        user_prompt = f"Rewrite this code to fulfill the following intent: {job.intent}\n\n"
         if job.llm_feedback:
-            user += f"\n\nPREVIOUS ERROR: {job.llm_feedback}\nPlease fix this and return ONLY the raw code."
-        
-        raw_payload = self.llm.generate(system, user)
-        
-        # Surgical cleaning of markdown blocks using regex
-        import re
-        code_block_match = re.search(r"```(?:\w+)?\n(.*?)\n```", raw_payload, re.DOTALL)
-        if code_block_match:
-            clean_payload = code_block_match.group(1).strip()
-        else:
-            clean_payload = raw_payload.strip().replace("```", "")
-        
-        job.llm_payload = clean_payload
+            user_prompt += f"PREVIOUS SYNTAX ERROR: {job.llm_feedback}\n\n"
+            
+        if hasattr(job, "test_stdout") and job.test_stdout:
+            user_prompt += f"TEST FAILURE (Fix this error in your rewrite):\n{job.test_stdout}\n\n"
+            
+        user_prompt += f"Code to rewrite:\n{node_data['node_string']}"
+
+        fixed_code = self.llm.generate(system_prompt, user_prompt)
+        if fixed_code is None:
+            logger.error(f"[{self.name}] LLM generation failed (returned None).")
+            return "ABORT", job
+            
+        job.fixed_code = fixed_code
         return "SYNTAX_GATE", job
 
 
 class SyntaxGateState(State):
-    def __init__(self, profile: LanguageProfile):
+    """
+    Validates the generated code before it touches the disk.
+    """
+    def __init__(self, profile):
         super().__init__("SYNTAX_GATE")
         self.gate = SyntaxGate(profile.get_language_ptr())
 
     def tick(self, job: JobPayload) -> Tuple[str, Any]:
         logger.info(f"[{self.name}] Validating surgical AST...")
-        result = self.gate.validate(job.llm_payload)
+        result = self.gate.validate(job.fixed_code)
+        
         if result["valid"]:
-            job.llm_feedback = "" # Clear feedback on success
             return "ACTUATE", job
         
         logger.error(f"[{self.name}] Syntax validation failed: {result['error_message']}")
@@ -212,6 +165,7 @@ class SyntaxGateState(State):
 class ActuateState(State):
     def __init__(self):
         super().__init__("ACTUATE")
+        self.splicer = ASTSplice()
 
     def tick(self, job: JobPayload) -> Tuple[str, Any]:
         node_data = getattr(job, "extracted_node", None)
@@ -222,83 +176,42 @@ class ActuateState(State):
         filepath = job.target_files[job.current_file_index]
         
         logger.info(f"[{self.name}] Splicing {filepath} via Drive-by-Wire")
-        success = DriveByWireActuator.splice(
-            filepath,
-            node_data["full_source"],
-            node_data["start_byte"],
-            node_data["end_byte"],
-            job.llm_payload
-        )
         
-        if success:
-            job.current_file_index += 1
-            if job.current_file_index < len(job.target_files):
-                return "SENSE", job
+        status, result = self.splicer.tick({
+            "filepath": filepath,
+            "full_source": node_data["full_source"],
+            "start_byte": node_data["start_byte"],
+            "end_byte": node_data["end_byte"],
+            "new_code": job.fixed_code
+        })
+
+        if status == "SUCCESS":
             return "EVALUATE", job
         
+        logger.error(f"[{self.name}] Splice failed: {result}")
         return "ABORT", job
 
 
-class SearchState(SEARCH):
-    def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
-        # Perform the base search logic
-        _, job = super().tick(job)
-        # Redirect the pipeline to our granular states
-        return "SENSE", job
-
-
-# --- THE ENGINE RUNNER ---
-
-
 def main():
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Ariadne Engine")
-    parser.add_argument(
-        "--step", action="store_true", help="Pause between states for manual approval"
-    )
-    parser.add_argument(
-        "--targets", 
-        nargs="+", 
-        default=["test.rs"], 
-        help="Files or directories to operate on"
-    )
-    parser.add_argument(
-        "--log-level",
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        help="Set the logging level",
-    )
+    parser = argparse.ArgumentParser(description="Ariadne ECU: Surgical Code Repair Engine")
+    parser.add_argument("--targets", nargs="+", help="Files or directories to ingest")
+    parser.add_argument("--profile", default="rust", help="Language profile to use")
+    parser.add_argument("--log-level", default="INFO", help="Logging level")
     args = parser.parse_args()
 
-    # Configure logging based on flag
-    numeric_level = getattr(logging, args.log_level.upper(), None)
-    logging.basicConfig(
-        level=numeric_level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
-    )
+    logging.getLogger("ariadne").setLevel(args.log_level)
 
-    # Silence noisy third-party loggers
-    logging.getLogger("litellm").setLevel(logging.WARNING)
-    logging.getLogger("LiteLLM").setLevel(logging.WARNING)
-    logging.getLogger("openai").setLevel(logging.WARNING)
-    logging.getLogger("httpcore").setLevel(logging.WARNING)
-    logging.getLogger("asyncio").setLevel(logging.WARNING)
-
-    # 1. Configuration and Model Setup
-    model_info = {
-        "model": os.getenv("ARIADNE_MODEL") or "openai/llama-cpp",
-        "api_base": os.getenv("ARIADNE_API_BASE") or "http://localhost:8080/v1"
-    }
-
-    # 2. Detect and load profile
-    profile, target_files = ProfileLoader.expand_targets(args.targets)
-    if not profile:
-        logger.critical(f"No profile found for targets: {args.targets}")
-        return
-
+    # 1. Load Profile
+    profile = ProfileLoader.load_profile(args.profile)
+    
+    # 2. Expand Targets
+    target_files = ProfileLoader.expand_targets(args.targets or ["."], profile)
     logger.info(f"Loaded {profile.name} profile with {len(target_files)} files.")
+
+    model_info = {
+        "model": os.getenv("ARIADNE_MODEL"),
+        "api_base": os.getenv("ARIADNE_API_BASE"),
+    }
 
     # 3. Register our available states
     states_registry = {
@@ -309,71 +222,45 @@ def main():
             profile=profile,
             target_files=target_files
         ),
-        "EVALUATE": EVALUATE(test_command=" ".join(profile.check_command)),
+        "EVALUATE": EVALUATE(
+            test_command=f"python run_rust_tests.py {target_files[0]} test_contract{profile.extensions[0]}" 
+            if profile.name == "Rust" else " ".join(profile.check_command)
+        ),
         "SEARCH": SEARCH(
             model_info, 
             profile=profile, 
             node_query_template=profile.get_query("{node_name}")
         ),
-
         "SENSE": SenseState(profile),
         "CODING": CodingState(model_info, profile),
         "SYNTAX_GATE": SyntaxGateState(profile),
         "ACTUATE": ActuateState(),
     }
 
-    # 4. Start the ignition
-    current_state_name = "TRIAGE"
-    
-    # We start with a dict payload to preserve target_files through TRIAGE
-    payload = {
-        "input": """
-        Rewrite take_damage to implement armor mitigation and a death state:
-        1. If the incoming amount is greater than 50, reduce the amount by 20% (use integer math).
-        2. Subtract the final amount from self.health.
-        3. If self.health drops to 0 or below, clamp it to 0 and print "CRITICAL: Player Dead!".
-        4. Otherwise, print the remaining health.
-        """,
-        "target_files": target_files
-    }
+    # 4. Initialize Engine Context
+    context = EngineContext(initial_state="TRIAGE")
+    payload = {"input": "Implement armor mitigation and death state in take_damage method."}
 
-    # 5. The main Engine Loop with benchmarking
-    import time
-
-    total_start_time = time.time()
-
-    # Terminal states for the loop
-    terminal_states = ["IDLE", "SUCCESS", "HALT", "ABORT", None]
-
-    while current_state_name not in terminal_states:
-        active_state = states_registry.get(current_state_name)
-
+    # 5. Run the Loop
+    while context.current_state != "SUCCESS" and context.current_state != "ABORT":
+        logger.info(f"--- TICKING: {context.current_state} ---")
+        active_state = states_registry.get(context.current_state)
+        
         if not active_state:
-            logger.critical(f"Unknown state requested: {current_state_name}")
+            logger.error(f"State {context.current_state} not found!")
             break
 
-        # --- INTERVENTION GATE ---
-        if args.step:
-            print(f"\n[INTERVENE] Next State: {active_state.name}")
-            ui = input("Proceed? [Y/n]: ").strip().lower()
-            if ui == "n":
-                logger.warning("Execution aborted by user.")
-                break
-
-        state_start_time = time.time()
+        import time
+        start_time = time.time()
         
-        # Pure function tick: Payload in, (next_state, Payload) out.
-        logger.info(f"--- TICKING: {active_state.name} ---")
         current_state_name, payload = active_state.tick(payload)
         
-        state_end_time = time.time()
-        state_duration = state_end_time - state_start_time
+        elapsed = time.time() - start_time
+        logger.info(f"[BENCHMARK] {context.current_state} took {elapsed:.2f}s")
+        
+        context.transition(current_state_name)
 
-        logger.info(f"[BENCHMARK] {active_state.name} took {state_duration:.2f}s")
-
-    total_duration = time.time() - total_start_time
-    logger.info(f"[BENCHMARK] Total time: {total_duration:.2f}s")
-    logger.info(f"Engine dropped to terminal state: {current_state_name}")
+    logger.info(f"Engine dropped to terminal state: {context.current_state}")
 
 
 if __name__ == "__main__":
