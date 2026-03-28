@@ -108,28 +108,52 @@ class QueryLLM(State):
         user = payload.get("user", "")
         schema = payload.get("schema")
 
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ]
+        # Fallback to raw prompt if hitting a local server that might have broken chat templates
+        full_prompt = f"{system}\n\nUser: {user}\nAssistant:"
 
         try:
-            # Prepare arguments, omitting None values
+            # Prepare arguments
             completion_args = {
                 "model": self.model,
-                "messages": messages,
                 "api_base": self.api_base,
                 "temperature": 0.0,
+                "max_tokens": 512,
             }
             if self.api_key:
                 completion_args["api_key"] = self.api_key
-            if schema:
-                completion_args["response_format"] = {"type": "json_object"}
+            
+            # Use 'prompt' instead of 'messages' to hit /v1/completions
+            if "localhost" in self.api_base:
+                completion_args["prompt"] = full_prompt
+            else:
+                completion_args["messages"] = [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ]
 
             response = litellm.completion(**completion_args)
-            content = response.choices[0].message.content
+            
+            # LiteLLM sometimes returns message.content even for raw prompts
+            if hasattr(response.choices[0], "message"):
+                content = response.choices[0].message.content
+            else:
+                content = response.choices[0].text
 
             if schema:
+                # Attempt to extract JSON from the text
+                import re
+                import json
+                
+                # Look for everything between the first '{' and last '}'
+                # This is more robust against markdown formatting or preamble yapping
+                json_match = re.search(r"(\{.*\})", content, re.DOTALL)
+                if json_match:
+                    try:
+                        return "SUCCESS", json.loads(json_match.group(1))
+                    except json.JSONDecodeError:
+                        pass
+                
+                # Fallback to direct load
                 try:
                     return "SUCCESS", json.loads(content)
                 except json.JSONDecodeError:
@@ -213,7 +237,7 @@ class WriteFile(State):
 class ASTSplice(State):
     """
     Surgical AST-based splicing primitive.
-    Input Payload: Dict with 'filepath', 'full_source' (bytes), 'start_byte', 'end_byte', and 'new_code' (str).
+    Input Payload: Dict with 'filepath' and 'edits' (list of dicts with 'start_byte', 'end_byte', 'new_code').
     Returns: Tuple[str, str] (status, filepath)
     """
 
@@ -222,21 +246,33 @@ class ASTSplice(State):
 
     def tick(self, payload: Dict[str, Any]) -> Tuple[str, str]:
         filepath = payload.get("filepath")
-        full_source = payload.get("full_source")
-        start_byte = payload.get("start_byte")
-        end_byte = payload.get("end_byte")
-        new_code = payload.get("new_code")
+        edits = payload.get("edits", [])
 
-        if "```" in new_code:
-            logger.error("ASTSplice rejected: Code contains markdown backticks.")
-            return "REJECTED", "Markdown detected"
+        if not edits:
+            return "SUCCESS", filepath
+
+        # Sort edits in reverse order (bottom-up) to prevent byte offset corruption
+        edits.sort(key=lambda x: x["start_byte"], reverse=True)
 
         try:
-            new_code_bytes = new_code.encode("utf-8")
-            before = full_source[:start_byte]
-            after = full_source[end_byte:]
+            with open(filepath, "rb") as f:
+                full_source = f.read()
 
-            new_source_code = before + new_code_bytes + after
+            new_source_code = full_source
+
+            for edit in edits:
+                new_code = edit["new_code"]
+                if "```" in new_code:
+                    logger.error("ASTSplice rejected: Code contains markdown backticks.")
+                    return "REJECTED", "Markdown detected"
+
+                new_code_bytes = new_code.encode("utf-8")
+                start_byte = edit["start_byte"]
+                end_byte = edit["end_byte"]
+
+                before = new_source_code[:start_byte]
+                after = new_source_code[end_byte:]
+                new_source_code = before + new_code_bytes + after
 
             with open(filepath, "wb") as f:
                 f.write(new_source_code)

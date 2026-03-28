@@ -69,7 +69,7 @@ class IgnoreHandler:
 
 class SenseState(State):
     """
-    Acquires the exact AST coordinates for a target symbol.
+    Acquires the exact AST coordinates for target symbols.
     """
     def __init__(self, profile):
         super().__init__("SENSE")
@@ -81,116 +81,157 @@ class SenseState(State):
             return "SUCCESS", job
 
         filepath = job.target_files[job.current_file_index]
-        # In a real system, SEARCH would pass the exact symbol name.
-        # For the multi-file refactor, we use the intent-based symbol.
-        symbol = "take_damage" 
+        job.extracted_nodes = []
 
-        query = self.profile.get_query(symbol)
-        node_data = self.sensor.extract_node(filepath, query, "function")
+        # If no symbols provided (e.g. bypassed SEARCH), fallback to intent heuristic
+        symbols_to_find = job.target_symbols if job.target_symbols else ["take_damage"]
 
-        if node_data:
-            job.extracted_node = node_data
-            logger.info(f"[{self.name}] Target acquired in {filepath}")
-            return "CODING", job
+        for symbol in symbols_to_find:
+            query = self.profile.get_query(symbol)
+            node_data = self.sensor.extract_node(filepath, query, self.profile.target_capture_name)
 
-        logger.warning(f"[{self.name}] Symbol not found in {filepath}, skipping.")
-        job.current_file_index += 1
-        return "SENSE", job
+            if node_data:
+                node_data["symbol"] = symbol
+                job.extracted_nodes.append(node_data)
+                logger.info(f"[{self.name}] Target acquired in {filepath}: {symbol}")
+            else:
+                logger.warning(f"[{self.name}] Symbol not found in {filepath}: {symbol}")
+
+        if not job.extracted_nodes:
+            job.current_file_index += 1
+            return "SENSE", job
+
+        return "CODING", job
 
 
 class CodingState(State):
     """
-    Uses LLM to rewrite the acquired AST node.
+    Uses LLM to rewrite the acquired AST nodes via strict JSON schema.
     """
     def __init__(self, model_info: Dict[str, Any], profile: Any):
         super().__init__("CODING")
-        self.llm = LiteLLMProvider(
-            model=model_info.get("model"), 
-            base_url=model_info.get("api_base"),
-            verbose=True
-        )
+        # Switch to QueryLLM to utilize the built-in JSON schema parsing
+        self.llm = QueryLLM(model=model_info.get("model"), api_base=model_info.get("api_base"))
         self.profile = profile
 
     def tick(self, job: JobPayload) -> Tuple[str, Any]:
-        node_data = job.extracted_node
-        if not node_data:
+        if not job.extracted_nodes:
             return "SENSE", job
 
         logger.info(f"[{self.name}] --- AMNESIC TICK: Fresh LLM Context for {job.target_files[job.current_file_index]} ---")
-        
-        system_prompt = (
-            f"You are an expert {self.profile.name} developer. You act as an execution engine. "
-            f"You only output raw, valid {self.profile.name} code. NO markdown formatting. "
-            f"NO backticks. NO conversational text or explanations."
-        )
-        
+
+        system_prompt = self.profile.coding_system_prompt
+
         user_prompt = f"Rewrite this code to fulfill the following intent: {job.intent}\n\n"
+
         if job.llm_feedback:
-            user_prompt += f"PREVIOUS SYNTAX ERROR: {job.llm_feedback}\n\n"
-            
+            user_prompt += f"PREVIOUS ERROR: {job.llm_feedback}\n\n"
+
         if hasattr(job, "test_stdout") and job.test_stdout:
             user_prompt += f"TEST FAILURE (Fix this error in your rewrite):\n{job.test_stdout}\n\n"
-            
-        user_prompt += f"Code to rewrite:\n{node_data['node_string']}"
 
-        fixed_code = self.llm.generate(system_prompt, user_prompt)
-        if fixed_code is None:
-            logger.error(f"[{self.name}] LLM generation failed (returned None).")
+        context_str = ""
+        for node in job.extracted_nodes:
+            context_str += f"--- Symbol: {node['symbol']} ---\n{node['node_string']}\n\n"
+
+        user_prompt += f"Code to rewrite:\n{context_str}"
+
+        schema = {
+            "edits": [
+                {
+                    "symbol": "string (the name of the function/struct being edited)",
+                    "new_code": "string (the complete rewritten code for this symbol)"
+                }
+            ]
+        }
+
+        status, response = self.llm.tick({
+            "system": system_prompt,
+            "user": user_prompt,
+            "schema": schema
+        })
+
+        if status != "SUCCESS":
+            logger.error(f"[{self.name}] LLM generation failed: {response}")
             return "ABORT", job
-            
-        job.fixed_code = fixed_code
+
+        job.fixed_code = response  # Now a dictionary with 'edits'
         return "SYNTAX_GATE", job
 
 
 class SyntaxGateState(State):
     """
-    Validates the generated code before it touches the disk.
+    Validates all generated code snippets before they touch the disk.
     """
     def __init__(self, profile):
         super().__init__("SYNTAX_GATE")
         self.gate = SyntaxGate(profile.get_language_ptr())
 
     def tick(self, job: JobPayload) -> Tuple[str, Any]:
-        logger.info(f"[{self.name}] Validating surgical AST...")
-        result = self.gate.validate(job.fixed_code)
-        
-        if result["valid"]:
-            return "ACTUATE", job
-        
-        logger.error(f"[{self.name}] Syntax validation failed: {result['error_message']}")
-        job.llm_feedback = f"Syntax error or illegal markdown: {result['error_message']}"
-        return "CODING", job
+        logger.info(f"[{self.name}] Validating surgical ASTs...")
+
+        if not isinstance(job.fixed_code, dict) or "edits" not in job.fixed_code:
+            job.llm_feedback = "Response must be a JSON object with an 'edits' array."
+            return "CODING", job
+
+        for edit in job.fixed_code["edits"]:
+            result = self.gate.validate(edit["new_code"])
+            if not result["valid"]:
+                error_msg = result['error_message']
+                symbol_name = edit.get('symbol', 'unknown')
+                logger.error(f"[{self.name}] Syntax validation failed for {symbol_name}: {error_msg}")
+                job.llm_feedback = f"Syntax error in {symbol_name}: {error_msg}"
+                return "CODING", job
+
+        job.llm_feedback = ""
+        return "ACTUATE", job
 
 
 class ActuateState(State):
+    """
+    Splices all valid edits into the file in reverse byte-order.
+    """
     def __init__(self):
         super().__init__("ACTUATE")
         self.splicer = ASTSplice()
 
     def tick(self, job: JobPayload) -> Tuple[str, Any]:
-        node_data = getattr(job, "extracted_node", None)
-        if not node_data or "full_source" not in node_data:
+        if not job.extracted_nodes:
             logger.error(f"[{self.name}] No surgical target acquired! Aborting splice.")
             return "ABORT", job
 
         filepath = job.target_files[job.current_file_index]
-        
-        logger.info(f"[{self.name}] Splicing {filepath} via Drive-by-Wire")
-        
+
+        edits_to_apply = []
+        for edit in job.fixed_code.get("edits", []):
+            symbol = edit.get("symbol")
+            new_code = edit.get("new_code")
+            # Find the corresponding node data extracted in SENSE
+            node_data = next((n for n in job.extracted_nodes if n["symbol"] == symbol), None)
+            if node_data:
+                edits_to_apply.append({
+                    "start_byte": node_data["start_byte"],
+                    "end_byte": node_data["end_byte"],
+                    "new_code": new_code
+                })
+
+        if not edits_to_apply:
+            logger.error(f"[{self.name}] No matching symbols found in edits!")
+            job.llm_feedback = "Ensure 'symbol' matches the extracted node names."
+            return "CODING", job
+
+        logger.info(f"[{self.name}] Splicing {len(edits_to_apply)} nodes in {filepath}")
+
         status, result = self.splicer.tick({
             "filepath": filepath,
-            "full_source": node_data["full_source"],
-            "start_byte": node_data["start_byte"],
-            "end_byte": node_data["end_byte"],
-            "new_code": job.fixed_code
+            "edits": edits_to_apply
         })
 
         if status == "SUCCESS":
             return "EVALUATE", job
-        
+
         logger.error(f"[{self.name}] Splice failed: {result}")
         return "ABORT", job
-
 
 def main():
     parser = argparse.ArgumentParser(description="Ariadne ECU: Surgical Code Repair Engine")
@@ -239,7 +280,7 @@ def main():
 
     # 4. Initialize Engine Context
     context = EngineContext(initial_state="TRIAGE")
-    payload = {"input": "Implement armor mitigation and death state in take_damage method."}
+    payload = {"input": "Add a `stamina: f32` field to the Entity struct (default 100.0) and modify the `take_damage` function to subtract 10.0 stamina per hit."}
 
     # 5. Run the Loop
     while context.current_state != "SUCCESS" and context.current_state != "ABORT":

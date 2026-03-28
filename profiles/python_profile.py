@@ -22,11 +22,18 @@ class PythonProfile(LanguageProfile):
 
     def get_query(self, symbol_name: str) -> str:
         """
-        Construct a tree-sitter query to find a function definition by name.
+        Construct a tree-sitter query to find a function or class definition by name.
         """
         return (
-            f'(function_definition name: (identifier) @func_name (#eq? @func_name "{symbol_name}")) @function'
+            f'([\n'
+            f'  (function_definition name: (identifier) @name)\n'
+            f'  (class_definition name: (identifier) @name)\n'
+            f'] (#eq? @name "{symbol_name}")) @target'
         )
+
+    @property
+    def target_capture_name(self) -> str:
+        return "target"
 
     def get_skeleton_query(self) -> str:
         """
@@ -46,6 +53,25 @@ class PythonProfile(LanguageProfile):
             "Your output MUST contain ONLY test functions or classes.\n"
             "DO NOT include any of the original implementation code.\n"
             "Output RAW PYTHON CODE ONLY. No markdown, no explanations."
+        )
+
+    @property
+    def search_system_prompt(self) -> str:
+        return (
+            "You are a Python architect. Analyze the test error and the project skeletons.\n"
+            "Identify the specific function or class names that need to be modified or inspected.\n"
+            "Return a JSON object with a 'nodes' array of strings (e.g., ['MyClass', 'process_data'])."
+        )
+
+    @property
+    def coding_system_prompt(self) -> str:
+        return (
+            f"You are an expert Python developer. You act as a surgical execution engine.\n"
+            f"You MUST output ONLY a SINGLE valid JSON object. No markdown, no conversational text.\n"
+            f"The JSON object MUST contain exactly one key called 'edits', which is an array of objects.\n"
+            f"Example:\n"
+            f'{{\n  "edits": [\n    {{"symbol": "process_data", "new_code": "def process_data():\\n    pass"}}\n  ]\n}}\n'
+            f"Provide the exact rewritten code for each requested symbol."
         )
 
     def parse_search_result(self, response: str) -> Optional[str]:

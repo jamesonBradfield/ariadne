@@ -240,7 +240,7 @@ class LiteLLMProvider:
         self,
         system_prompt: str,
         user_prompt: str,
-        max_tokens: int = 2048,
+        max_tokens: int = 512,
         stop_sequences: list = None,
         stream: bool = False,
         stop_at_newline: bool = False,

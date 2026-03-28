@@ -37,6 +37,12 @@ class LanguageProfile(ABC):
 
     @property
     @abstractmethod
+    def target_capture_name(self) -> str:
+        """The Tree-sitter capture name for target symbols (e.g., 'target')."""
+        pass
+
+    @property
+    @abstractmethod
     def skeleton_capture_name(self) -> str:
         """The Tree-sitter capture name for skeletonized functions (e.g., 'func')."""
         pass
@@ -45,6 +51,18 @@ class LanguageProfile(ABC):
     @abstractmethod
     def test_generation_system_prompt(self) -> str:
         """The system prompt for generating language-specific unit tests."""
+        pass
+
+    @property
+    @abstractmethod
+    def search_system_prompt(self) -> str:
+        """The system prompt for identifying missing symbols from errors."""
+        pass
+
+    @property
+    @abstractmethod
+    def coding_system_prompt(self) -> str:
+        """The system prompt for generating the final code fix."""
         pass
 
     @abstractmethod

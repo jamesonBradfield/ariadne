@@ -22,11 +22,19 @@ class RustProfile(LanguageProfile):
 
     def get_query(self, symbol_name: str) -> str:
         """
-        Construct a tree-sitter query to find a function item by name.
+        Construct a tree-sitter query to find a function, struct, or impl block by name.
         """
         return (
-            f'(function_item name: (identifier) @func_name (#eq? @func_name "{symbol_name}")) @function'
+            f'([\n'
+            f'  (function_item name: (identifier) @name)\n'
+            f'  (struct_item name: (type_identifier) @name)\n'
+            f'  (impl_item type: (type_identifier) @name)\n'
+            f'] (#eq? @name "{symbol_name}")) @target'
         )
+
+    @property
+    def target_capture_name(self) -> str:
+        return "target"
 
     def get_skeleton_query(self) -> str:
         """
@@ -48,6 +56,24 @@ class RustProfile(LanguageProfile):
             "DO NOT include any `impl` blocks for methods.\n"
             "DO NOT include any `use` statements unless they are part of the test function itself.\n"
             "Output RAW RUST CODE ONLY. No markdown, no explanations."
+        )
+
+    @property
+    def search_system_prompt(self) -> str:
+        return (
+            "You are a Rust architect. Analyze the test error and the project skeletons.\n"
+            "Identify the specific function, struct, or impl block names that need to be modified or inspected.\n"
+            "Return a JSON object with a 'nodes' array of strings (e.g., ['Entity', 'take_damage'])."
+        )
+
+    @property
+    def coding_system_prompt(self) -> str:
+        return (
+            f"You are an expert Rust developer. You act as a surgical execution engine.\n"
+            f"You MUST output a valid JSON object with an 'edits' key. Each edit must contain 'symbol' and 'new_code'.\n"
+            f"Example:\n"
+            f'{{"edits": [{{"symbol": "Entity", "new_code": "struct Entity {{ ... }}"}}]}}\n'
+            f"Output ONLY the JSON object. No conversational text."
         )
 
     def parse_search_result(self, response: str) -> Optional[str]:

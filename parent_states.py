@@ -81,13 +81,13 @@ class DISPATCH(State):
         logger.debug(f"[DISPATCH] Skeleton Context (API Surface):\n{skeleton_context}")
         
         # 2. Generate Test
-        system_prompt = self.profile.test_generation_system_prompt
-        user_prompt = f"Intent: {intent}\n\n{self.profile.name} API Surface:\n{skeleton_context}"
-        
-        status, test_code = self.query_llm.tick({
-            "system": system_prompt,
-            "user": user_prompt
+        status, response = self.query_llm.tick({
+            "system": self.profile.test_generation_system_prompt,
+            "user": f"Intent: {intent}\n\n{self.profile.name} API Surface:\n{skeleton_context}",
+            "schema": {"test_code": "raw code string"}
         })
+        
+        test_code = response.get("test_code", "") if isinstance(response, dict) else response
         
         # 3. Prompt for Approval
         p_status, approved = self.prompt_user.tick(f"Proposed Test:\n{test_code}")
@@ -150,29 +150,20 @@ class SEARCH(State):
             all_skeletons.extend(skeletons)
             
         # 2. Identify missing nodes
-        system_prompt = "Identify the specific function or struct names needed to satisfy the test error."
         status, needed_nodes = self.query_llm.tick({
-            "system": system_prompt,
+            "system": self.profile.search_system_prompt,
             "user": f"Error: {job.test_stdout}\nSkeletons: {' '.join(all_skeletons)}",
-            "schema": {"nodes": ["list of strings"]}
+            "schema": {"nodes": ["string1", "string2"]}
         })
         
-        # 3. Extract full code for identified nodes
-        # Clear previous context for amnesia-tick style isolation
-        job.extracted_context = []
+        # 3. Queue symbols for SENSE
+        job.target_symbols = []
         
         if isinstance(needed_nodes, dict) and "nodes" in needed_nodes:
-            for node_name in needed_nodes["nodes"]:
-                status, full_code_list = self.extractor.tick({
-                    "filepath": job.target_files[0],
-                    "query_string": self.node_query_template.format(node_name=node_name),
-                    "capture_name": "node"
-                })
-                if status == "SUCCESS":
-                    job.extracted_context.extend(full_code_list)
-                    logger.info(f"Extracted node: {node_name}")
+            job.target_symbols = needed_nodes["nodes"]
+            logger.info(f"[{self.name}] Identified target symbols: {job.target_symbols}")
                 
-        return "CODING", job
+        return "SENSE", job
 
 class CODING(State):
     """
