@@ -4,11 +4,11 @@ import os
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
-from core import EngineContext, State
-from payloads import JobPayload
-from primitives import QueryLLM, ASTSplice
-from parent_states import TRIAGE, DISPATCH, EVALUATE, SEARCH
-from components import TreeSitterSensor, SyntaxGate
+from ariadne.core import EngineContext, State
+from ariadne.payloads import JobPayload
+from ariadne.primitives import QueryLLM, ASTSplice
+from ariadne.states import TRIAGE, DISPATCH, EVALUATE, SEARCH
+from ariadne.components import TreeSitterSensor, SyntaxGate
 
 # Setup logging
 logging.basicConfig(
@@ -89,10 +89,10 @@ class ProfileLoader:
     @staticmethod
     def load_profile(name: str):
         if name.lower() == "rust":
-            from profiles.rust_profile import RustProfile
+            from ariadne.profiles.rust_profile import RustProfile
             return RustProfile()
         elif name.lower() == "python":
-            from profiles.python_profile import PythonProfile
+            from ariadne.profiles.python_profile import PythonProfile
             return PythonProfile()
         else:
             raise ValueError(f"Unsupported profile: {name}")

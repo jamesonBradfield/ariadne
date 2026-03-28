@@ -1,7 +1,7 @@
 import re
 from typing import Any, Optional
 import tree_sitter_rust
-from profiles.base import LanguageProfile
+from .base import LanguageProfile
 
 
 class RustProfile(LanguageProfile):

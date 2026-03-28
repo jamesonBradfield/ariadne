@@ -1,8 +1,8 @@
 import logging
 from typing import Any, Tuple, Dict, List
-from core import State
-from payloads import JobPayload
-from primitives import ExtractAST, QueryLLM, ExecuteCommand, PromptUser, WriteFile
+from .core import State
+from .payloads import JobPayload
+from .primitives import ExtractAST, QueryLLM, ExecuteCommand, PromptUser, WriteFile
 
 logger = logging.getLogger("ariadne.parent_states")
 

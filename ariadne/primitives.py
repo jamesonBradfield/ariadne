@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import tree_sitter
 
-from core import State
+from .core import State
 
 logger = logging.getLogger("ariadne.primitives")
 
