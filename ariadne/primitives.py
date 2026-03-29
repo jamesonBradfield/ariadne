@@ -114,8 +114,9 @@ class QueryLLM(State):
         logger.info(f"[LLM REQUEST] User Prompt: {user}")
 
         # Robustness: Combine system and user for local servers if needed
+        # (Merging often bypasses "yapping" and truncation on local servers)
         if "localhost" in self.api_base:
-            messages = [{"role": "user", "content": f"SYSTEM: {system}\n\nUSER: {user}"}]
+            messages = [{"role": "user", "content": f"INSTRUCTIONS: {system}\n\nCONTEXT:\n{user}"}]
         else:
             messages = [
                 {"role": "system", "content": system},
@@ -139,37 +140,91 @@ class QueryLLM(State):
             if post_process == "extract_json" and "localhost" not in self.api_base:
                  completion_args["response_format"] = {"type": "json_object"}
 
-            response = litellm.completion(**completion_args)
-            content = response.choices[0].message.content
+            # Local server can be slow to load models
+            import time
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    response = litellm.completion(**completion_args)
+                    break
+                except Exception as e:
+                    if "503" in str(e) and attempt < max_retries - 1:
+                        logger.warning(f"Server loading model (503). Retrying in 5s... (Attempt {attempt+1}/{max_retries})")
+                        time.sleep(5)
+                    else:
+                        raise e
+
+            # Extract content - prioritize standard message content
+            message = response.choices[0].message
+            content = message.content or ""
             
-            logger.info(f"[LLM RESPONSE] Raw Content: {content}")
+            # Log reasoning if present, but truncated
+            r_log = ""
+            if hasattr(message, "reasoning_content") and message.reasoning_content:
+                r_log = message.reasoning_content
+            elif isinstance(message, dict) and "reasoning_content" in message:
+                r_log = message["reasoning_content"]
+            
+            if r_log:
+                logger.info(f"[LLM REASONING] {r_log[:500]}... [TRUNCATED]")
+
+            # Use reasoning_content ONLY if standard content is empty
+            if not content and r_log:
+                content = r_log
+
+            # NUDGE NUDGE: If prompt ended with a bracket, put it back
+            if user.endswith("{") and not content.startswith("{"):
+                content = "{" + content
+
+            logger.info(f"[LLM RESPONSE] Raw Choices: {response.choices}")
+            logger.info(f"[LLM RESPONSE] Final Content: '{content}'")
 
             # Post-Processing Logic
             if post_process == "extract_json":
-                # Robust extraction: find the outermost { } pair
-                # This must happen BEFORE stripping <think> tokens just in case
-                # the model provided a valid JSON but put it inside/after think
-                start_index = content.find("{")
-                if start_index != -1:
-                    bracket_count = 0
-                    for i in range(start_index, len(content)):
-                        if content[i] == "{":
-                            bracket_count += 1
-                        elif content[i] == "}":
-                            bracket_count -= 1
-                            if bracket_count == 0:
-                                json_str = content[start_index : i + 1]
-                                try:
-                                    return "SUCCESS", json.loads(json_str)
-                                except json.JSONDecodeError:
-                                    break
+                # STRATEGY 1: Check for explicit separator
+                if "--- JSON PLAN ---" in content:
+                    content = content.split("--- JSON PLAN ---")[-1]
+
+                # STRATEGY 2: Find all possible JSON blocks and pick the one that parses successfully
+                import re
                 
-                # Strip thinking tokens if present (common in Qwen models) and try again
-                cleaned_content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-                try:
-                    return "SUCCESS", json.loads(cleaned_content)
-                except json.JSONDecodeError:
-                    return "JSON_ERROR", content
+                # Find all candidates starting with { and ending with }
+                candidates = []
+                stack = []
+                start = -1
+                for i, char in enumerate(content):
+                    if char == '{':
+                        if not stack:
+                            start = i
+                        stack.append('{')
+                    elif char == '}':
+                        if stack:
+                            stack.pop()
+                            if not stack:
+                                candidates.append(content[start:i+1])
+                
+                # Sort candidates by length (longest first usually has the full plan)
+                candidates.sort(key=len, reverse=True)
+                
+                for cand in candidates:
+                    try:
+                        parsed = json.loads(cand)
+                        # Optional: Validate schema here if needed
+                        return "SUCCESS", parsed
+                    except json.JSONDecodeError:
+                        continue
+                
+                # TRUNCATION REPAIR (Fallback): If we have an open JSON but it's truncated
+                # Only if the server still cut us off despite the high limit
+                if stack:
+                    logger.warning("Detected truncated JSON, attempting repair...")
+                    repaired_json = content[start:] + "}" * len(stack)
+                    try:
+                        return "SUCCESS", json.loads(repaired_json)
+                    except Exception:
+                        pass
+
+                return "JSON_ERROR", content
 
             if post_process == "strip_markdown":
                 code_match = re.search(r"```(?:\w+)?\n(.*?)\n```", content, re.DOTALL)

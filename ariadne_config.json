@@ -10,24 +10,25 @@
   },
   "states": {
     "TRIAGE": {
-      "system_prompt": "You are a triage agent. Output ONLY the technical intent. NO yapping. NO preamble. Output raw text only.",
-      "user_prompt_template": "{{input}}",
-      "params": { "max_tokens": 50 }
+      "system_prompt": "You are a Triage Agent. Distill input + environment into a single technical intent sentence. Output raw text ONLY. NO yapping.",
+      "user_prompt_template": "INPUT: {{input}}\nENV: {{environment_state}}\nINTENT:",
+      "params": { "max_tokens": 1024 }
+    },
+    "THINKING": {
+      "system_prompt": "You are the Master Planner. Rules:\n1. Think step-by-step first.\n2. Output a clear separator: '--- JSON PLAN ---'.\n3. Output ONLY a RAW JSON object after the separator.\nAvailable Actions: DISPATCH, SEARCH, SUCCESS.\nStructure: {\"action\": \"...\", \"reasoning\": \"...\", \"steps\": []}",
+      "user_prompt_template": "Intent: {{intent}}\nErrors: {{test_stdout}}\nHas Test: {{has_test}}\nSymbols: {{available_symbols}}\n\nYour Analysis and Plan:",
+      "params": { "max_tokens": 2048 },
+      "post_process": "extract_json"
     },
     "DISPATCH": {
-      "system_prompt": "You are a {{language}} test generator. Rules:\n1. ONLY pick names from the 'API Surface' provided.\n2. DO NOT invent new types or functions (e.g. if 'Entity' exists, DO NOT use 'Hero').\n3. Output ONLY #[test] functions. NO markdown. NO explanations.",
+      "system_prompt": "You are a {{language}} test generator. Rules: 1. Use ONLY provided API names. 2. Output ONLY #[test] functions. NO markdown.",
       "user_prompt_template": "Intent: {{intent}}\n\n{{language}} API Surface:\n{{skeleton_context}}",
       "post_process": "strip_markdown"
     },
-    "THINKING": {
-      "system_prompt": "You are an Architect. Create a logical repair plan. Rules:\n1. Use ONLY names from 'Available Symbols'.\n2. Compare 'Test Code' and 'Skeletons' to find naming mismatches (e.g. Test uses 'Hero' but Source has 'Entity').\n3. Output RAW JSON: {\"reasoning\": \"...\", \"steps\": [{\"symbol\": \"...\"}]}",
-      "user_prompt_template": "Intent: {{intent}}\nTest Code: {{test_code}}\nErrors: {{test_stdout}}\nAvailable: {{available_symbols}}\nSkeletons: {{skeletons}}",
-      "params": { "max_tokens": 512 },
-      "post_process": "extract_json"
-    },
     "CODING": {
-      "system_prompt": "You are a surgical execution engine. Output ONLY a SINGLE JSON object with an 'edits' array. Rules:\n1. ONLY rewrite symbols listed in 'Acquired Symbols'.\n2. Fix the specific error mentioned in 'error_context'.\n3. NO markdown. NO explanations. NO yapping.",
+      "system_prompt": "You are a surgical execution engine. Output ONLY a SINGLE JSON object with an 'edits' array. Rules: 1. ONLY rewrite acquired symbols. 2. NO markdown.",
       "user_prompt_template": "Intent: {{intent}}\nAcquired Symbols: {{acquired_symbols}}\n{{error_context}}\nCode:\n{{context_str}}",
+      "params": { "max_tokens": 2048 },
       "post_process": "extract_json"
     }
   }

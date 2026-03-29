@@ -178,13 +178,11 @@ def main():
     }
 
     # 4. Initialize Engine Context
-    context = EngineContext(initial_state=args.initial_state.upper())
+    # PERCEPTION FIRST: Start with EVALUATE to see the current state
+    context = EngineContext(initial_state="EVALUATE")
     
-    if context.current_state == "TRIAGE":
-        payload = {"input": args.intent, "target_files": target_files}
-    else:
-        # If bypassing TRIAGE/DISPATCH, mock the payload structure they would have created
-        payload = JobPayload(intent=args.intent, target_files=target_files)
+    # Payload starts with raw input for TRIAGE to distill later
+    payload = JobPayload(input=args.intent, target_files=target_files)
 
     # 5. Run the Loop
     while context.current_state != "SUCCESS" and context.current_state != "ABORT":

@@ -7,49 +7,10 @@ from .components import TreeSitterSensor, SyntaxGate
 
 logger = logging.getLogger("ariadne.parent_states")
 
-class TRIAGE(State):
-    """
-    Initializes ContextPayload and determines user intent.
-    """
-    def __init__(self, config_manager: Any):
-        super().__init__("TRIAGE")
-        self.config_manager = config_manager
-        self.config = config_manager.get_model_info("TRIAGE")
-        self.query_llm = QueryLLM(model=self.config.get("model"), api_base=self.config.get("api_base"))
-
-    def tick(self, payload: Any) -> Tuple[str, Any]:
-        # Support both raw string and dict-based payload for flexibility
-        if isinstance(payload, dict):
-            raw_input = payload.get("input", "")
-            # If intent is already there (e.g. from CLI flag), don't re-triage
-            if payload.get("intent"):
-                return "DISPATCH", payload
-        else:
-            raw_input = payload
-            
-        variables = {"input": raw_input}
-        system_prompt = self.config_manager.render_prompt(self.config.get("system_prompt", ""), variables)
-        user_prompt = self.config_manager.render_prompt(self.config.get("user_prompt_template", ""), variables)
-
-        status, intent = self.query_llm.tick({
-            "system": system_prompt,
-            "user": user_prompt,
-            "params": self.config.get("params", {}),
-            "post_process": self.config.get("post_process")
-        })
-        
-        if status != "SUCCESS":
-            return "ERROR", intent
-            
-        if isinstance(payload, dict):
-            payload["intent"] = intent
-            return "DISPATCH", payload
-            
-        return "DISPATCH", intent
-
 class DISPATCH(State):
     """
-    Creates JobPayload, generates a test, and gets user approval.
+    EXECUTION: Generates a test contract to define the failure state.
+    Queries LLM.
     """
     def __init__(self, config_manager: Any, test_filepath: str, profile: Any, target_files: List[str] = None):
         super().__init__("DISPATCH")
@@ -64,19 +25,10 @@ class DISPATCH(State):
         self.prompt_user = PromptUser()
         self.write_file = WriteFile()
 
-    def tick(self, payload: Any) -> Tuple[str, JobPayload]:
-        if isinstance(payload, dict):
-            intent = payload.get("intent", "")
-            t_files = list(set(self.target_files + payload.get("target_files", [])))
-        else:
-            intent = payload
-            t_files = self.target_files
-            
-        job = JobPayload(intent=intent, target_files=t_files)
-        
+    def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
         # 1. Get Skeleton for context
         all_skeletons = []
-        for filepath in t_files:
+        for filepath in job.target_files:
             status, skeletons = self.extractor.tick({
                 "filepath": filepath,
                 "query_string": self.skeleton_query,
@@ -89,7 +41,7 @@ class DISPATCH(State):
         # 2. Generate Test
         variables = {
             "language": self.profile.name,
-            "intent": intent,
+            "intent": job.intent,
             "skeleton_context": skeleton_context
         }
         system_prompt = self.config_manager.render_prompt(self.config.get("system_prompt", ""), variables)
@@ -116,7 +68,8 @@ class DISPATCH(State):
 
 class EVALUATE(State):
     """
-    Runs tests and routes based on pass/fail.
+    PERCEPTION: Runs tests and captures environment state (stdout/stderr/compiler output).
+    Does NOT query LLM.
     """
     def __init__(self, test_command: str = "cargo test"):
         super().__init__("EVALUATE")
@@ -124,24 +77,56 @@ class EVALUATE(State):
         self.executor = ExecuteCommand()
 
     def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
-        if job.retry_count > 3:
-            logger.error("Circuit breaker triggered: Too many retries.")
-            return "ABORT", job
-            
+        # Sensor: Get current state of the world
         status, output = self.executor.tick(self.test_command)
+        job.test_stdout = output
         
-        if status == "SUCCESS":
-            logger.info("Tests passed!")
-            return "SUCCESS", job
-        else:
-            logger.warning("Tests failed. Transitioning to THINKING.")
-            job.test_stdout = output
-            job.retry_count += 1
-            return "THINKING", job
+        # If we are in the initial setup, go to TRIAGE
+        if not job.intent:
+            return "TRIAGE", job
+            
+        # Otherwise, return to the Root (THINKING) to evaluate progress
+        return "THINKING", job
+
+class TRIAGE(State):
+    """
+    REASONING: Distills user input + environment state into a technical intent.
+    Queries LLM.
+    """
+    def __init__(self, config_manager: Any):
+        super().__init__("TRIAGE")
+        self.config_manager = config_manager
+        self.config = config_manager.get_model_info("TRIAGE")
+        self.query_llm = QueryLLM(model=self.config.get("model"), api_base=self.config.get("api_base"))
+
+    def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
+        # Merge raw input (if any) with perception data from EVALUATE
+        variables = {
+            "input": job.input or "None provided",
+            "environment_state": job.test_stdout or "Unknown"
+        }
+        
+        system_prompt = self.config_manager.render_prompt(self.config.get("system_prompt", ""), variables)
+        user_prompt = self.config_manager.render_prompt(self.config.get("user_prompt_template", ""), variables)
+
+        status, intent = self.query_llm.tick({
+            "system": system_prompt,
+            "user": user_prompt,
+            "params": self.config.get("params", {}),
+            "post_process": self.config.get("post_process")
+        })
+        
+        if status != "SUCCESS":
+            return "ERROR", job
+            
+        job.intent = intent
+        # Triage completed: Proceed to high-level Planning
+        return "THINKING", job
 
 class THINKING(State):
     """
-    Strategic Architect: Analyzes errors and creates a high-level repair plan.
+    STRATEGIC ARCHITECT (ROOT): Analyzes the current state and Distilled Intent to decide the next step.
+    Orchestrates transitions between SENSE, DISPATCH, and EVALUATE.
     """
     def __init__(self, config_manager: Any, profile: Any):
         super().__init__("THINKING")
@@ -152,10 +137,9 @@ class THINKING(State):
         self.extractor = ExtractAST(profile.get_language_ptr())
 
     def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
-        # 1. Gather context from target files
+        # 1. Perception Check: Gather symbols from target files
         all_skeletons = []
         available_symbols = []
-        
         for filepath in job.target_files:
             status, skeletons = self.extractor.tick({
                 "filepath": filepath,
@@ -164,56 +148,59 @@ class THINKING(State):
             })
             for s in skeletons:
                 import re
-                # Improved regex to handle optional visibility and various item types
                 name_match = re.search(r"(?:pub\s+)?(?:fn|struct|class|impl|enum|trait)\s+(\w+)", s)
                 if name_match:
                     available_symbols.append(name_match.group(1))
-                all_skeletons.append(f"--- Symbol Definition ---\n{s}")
-        
-        # Read the test content that failed
-        test_content = "Unknown"
-        if job.read_only_tests:
-            try:
-                with open(job.read_only_tests[0], "r") as f:
-                    test_content = f.read()
-            except Exception:
-                pass
+                all_skeletons.append(s)
 
-        # 2. Get available symbols for the architect
-        # Aggressively truncate errors and skeletons to keep local server happy
+        # 2. Planning: Use LLM to decide the next high-level action
+        # Compress available symbols to keep context window small
+        sym_summary = ", ".join(set(available_symbols))
+        if len(sym_summary) > 200:
+            sym_summary = sym_summary[:200] + "... [TRUNCATED]"
+
         variables = {
-            "intent": job.intent,
-            "test_code": test_content[:1000],
-            "test_stdout": job.test_stdout[:1000] + "... [TRUNCATED]" if len(job.test_stdout) > 1000 else job.test_stdout,
+            "intent": job.intent[:500], # Don't let intent bloat
+            "available_symbols": sym_summary,
+            "test_stdout": job.test_stdout[:500] if job.test_stdout else "No errors yet.",
             "retry_count": job.retry_count,
-            "available_symbols": ", ".join(set(available_symbols)),
-            "skeletons": "\n".join([s.split("{")[0].strip() for s in all_skeletons])[:1000], # Just signatures
-            "plan_history": "\n".join([f"- {p}" for p in job.plan_history]) if job.plan_history else "None"
+            "has_test": "Yes" if job.read_only_tests else "No"
         }
         
-        system_prompt = self.config_manager.render_prompt(self.config.get("system_prompt", ""), variables)
-        user_prompt = self.config_manager.render_prompt(self.config.get("user_prompt_template", ""), variables)
+        system_prompt = self.config_manager.render_prompt(
+            "You are the Master Planner. Your goal is to satisfy the Intent. "
+            "Available Actions:\n"
+            "- DISPATCH: Generate a new test if one is missing or incorrect.\n"
+            "- SEARCH: If we have a test failure and know what to fix.\n"
+            "- SUCCESS: If intent is satisfied and tests pass.\n"
+            "Output RAW JSON: {\"action\": \"...\", \"reasoning\": \"...\", \"steps\": [{\"symbol\": \"...\"}]}",
+            variables
+        )
+        user_prompt = self.config_manager.render_prompt(
+            "Intent: {{intent}}\nErrors: {{test_stdout}}\nHas Test: {{has_test}}\nSymbols: {{available_symbols}}", 
+            variables
+        )
 
         status, plan = self.query_llm.tick({
             "system": system_prompt,
             "user": user_prompt,
-            "params": self.config.get("params", {}),
+            "params": {"max_tokens": 512},
             "post_process": "extract_json"
         })
 
         if status == "SUCCESS" and isinstance(plan, dict):
             job.plan = plan
-            reasoning = plan.get('reasoning', 'No reasoning provided')
-            job.plan_history.append(reasoning) # Track history
-            logger.info(f"[{self.name}] Generated Plan: {reasoning}")
-            return "SEARCH", job
+            action = plan.get("action", "ABORT").upper()
+            logger.info(f"[{self.name}] Strategic Decision: {action} - {plan.get('reasoning')}")
+            
+            if action == "SEARCH":
+                # Populate target_symbols for SENSE
+                job.target_symbols = [step["symbol"] for step in plan.get("steps", []) if "symbol" in step]
+                return "SEARCH", job
+            
+            return action, job
         
-        logger.error(f"[{self.name}] Failed to generate logical plan. Status: {status}, Plan Type: {type(plan)}")
-        if status != "SUCCESS":
-             logger.error(f"[{self.name}] LLM Error Details: {plan}")
-        else:
-             logger.error(f"[{self.name}] Non-dict plan received. Raw content (truncated): {str(plan)[:500]}")
-             
+        logger.error(f"[{self.name}] Planning failed.")
         return "ABORT", job
 
 class SEARCH(State):

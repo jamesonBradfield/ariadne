@@ -3,7 +3,8 @@ from typing import List, Any, Optional, Dict
 
 @dataclass
 class JobPayload:
-    intent: str
+    input: str = ""
+    intent: str = ""
     read_only_tests: List[str] = field(default_factory=list)
     target_files: List[str] = field(default_factory=list)
     current_file_index: int = 0
