@@ -151,19 +151,28 @@ class SEARCH(State):
     def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
         # 1. Get skeletons for all target files
         all_skeletons = []
+        available_symbols = []
         for filepath in job.target_files:
             status, skeletons = self.extractor.tick({
                 "filepath": filepath,
                 "query_string": self.skeleton_query,
                 "capture_name": self.profile.skeleton_capture_name
             })
-            all_skeletons.extend(skeletons)
+            for s in skeletons:
+                # Basic heuristic to extract the name from the skeleton for the 'Available' list
+                import re
+                name_match = re.search(r"(?:fn|struct|class|impl|enum|trait)\s+(\w+)", s)
+                if name_match:
+                    available_symbols.append(name_match.group(1))
+                all_skeletons.append(f"--- Symbol Definition ---\n{s}")
             
         # 2. Identify missing nodes
         variables = {
             "language": self.profile.name,
+            "intent": job.intent,
             "test_stdout": job.test_stdout,
-            "skeletons": " ".join(all_skeletons)
+            "available_symbols": ", ".join(set(available_symbols)),
+            "skeletons": "\n\n".join(all_skeletons)
         }
         system_prompt = self.config_manager.render_prompt(self.config.get("system_prompt", ""), variables)
         user_prompt = self.config_manager.render_prompt(self.config.get("user_prompt_template", ""), variables)

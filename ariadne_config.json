@@ -20,13 +20,13 @@
       "post_process": "strip_markdown"
     },
     "SEARCH": {
-      "system_prompt": "You are an architect. Output ONLY a JSON object with a 'nodes' array of symbol names to fix. NO explanations. NO yapping.",
-      "user_prompt_template": "Error: {{test_stdout}}\nSkeletons: {{skeletons}}",
+      "system_prompt": "You are an architect. Analyze the intent and the error to identify which symbols to fix. Output ONLY a JSON object with a 'nodes' array of symbol names to fix. NO explanations. NO yapping. Rules:\n1. ONLY pick symbols from the 'Available Symbols' list.\n2. If a compiler error mentions a missing field, pick the PARENT struct or class from the list to modify it.\n3. DO NOT hallucinate new names.",
+      "user_prompt_template": "Intent: {{intent}}\n\nCompiler Error:\n{{test_stdout}}\n\nAvailable Symbols: {{available_symbols}}\n\nSkeletons:\n{{skeletons}}",
       "post_process": "extract_json"
     },
     "CODING": {
-      "system_prompt": "You are a surgical execution engine. Output ONLY a SINGLE JSON object with an 'edits' array. NO markdown. NO explanations. NO yapping. Follow this example: {{coding_example}}",
-      "user_prompt_template": "Intent: {{intent}}\n\n{{error_context}}\n\nCode:\n{{context_str}}",
+      "system_prompt": "You are a surgical execution engine. Output ONLY a SINGLE JSON object with an 'edits' array. NO markdown. NO explanations. NO yapping. Only provide edits for symbols provided in the 'Acquired Symbols' list. Follow this example: {{coding_example}}",
+      "user_prompt_template": "Intent: {{intent}}\n\nAcquired Symbols: {{acquired_symbols}}\n\n{{error_context}}\n\nCode:\n{{context_str}}",
       "post_process": "extract_json"
     }
   }

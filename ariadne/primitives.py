@@ -110,6 +110,9 @@ class QueryLLM(State):
         params = payload.get("params", {})
         post_process = payload.get("post_process")
 
+        logger.debug(f"[LLM REQUEST] System: {system}")
+        logger.debug(f"[LLM REQUEST] User: {user}")
+
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -133,6 +136,7 @@ class QueryLLM(State):
 
             response = litellm.completion(**completion_args)
             content = response.choices[0].message.content
+            logger.debug(f"[LLM RESPONSE] Raw: {content}")
 
             # Post-Processing Logic
             if post_process == "extract_json":

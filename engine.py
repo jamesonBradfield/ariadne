@@ -197,7 +197,9 @@ class CodingState(State):
             error_context += f"TEST FAILURE (Fix this error in your rewrite):\n{job.test_stdout}\n\n"
 
         context_str = ""
+        acquired_symbols = []
         for node in job.extracted_nodes:
+            acquired_symbols.append(node['symbol'])
             context_str += f"--- Symbol: {node['symbol']} ---\n{node['node_string']}\n\n"
 
         variables = {
@@ -205,6 +207,7 @@ class CodingState(State):
             "intent": job.intent,
             "error_context": error_context,
             "context_str": context_str,
+            "acquired_symbols": ", ".join(acquired_symbols),
             "coding_example": self.profile.coding_example
         }
 
@@ -274,7 +277,10 @@ class ActuateState(State):
         filepath = job.target_files[job.current_file_index]
 
         edits_to_apply = []
-        for edit in job.fixed_code.get("edits", []):
+        provided_edits = job.fixed_code.get("edits", [])
+        acquired_symbol_names = [n["symbol"] for n in job.extracted_nodes]
+
+        for edit in provided_edits:
             symbol = edit.get("symbol")
             new_code = edit.get("new_code")
             # Find the corresponding node data extracted in SENSE
@@ -285,10 +291,12 @@ class ActuateState(State):
                     "end_byte": node_data["end_byte"],
                     "new_code": new_code
                 })
+            else:
+                logger.warning(f"[{self.name}] LLM provided edit for symbol '{symbol}', but it was not in acquired list: {acquired_symbol_names}")
 
         if not edits_to_apply:
-            logger.error(f"[{self.name}] No matching symbols found in edits!")
-            job.llm_feedback = "Ensure 'symbol' matches the extracted node names."
+            logger.error(f"[{self.name}] No matching symbols found in edits! Provided: {[e.get('symbol') for e in provided_edits]}, Expected: {acquired_symbol_names}")
+            job.llm_feedback = f"Error: You provided edits for symbols we didn't acquire. Only edit these: {acquired_symbol_names}"
             return "CODING", job
 
         logger.info(f"[{self.name}] Splicing {len(edits_to_apply)} nodes in {filepath}")
