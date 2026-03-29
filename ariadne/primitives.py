@@ -110,13 +110,17 @@ class QueryLLM(State):
         params = payload.get("params", {})
         post_process = payload.get("post_process")
 
-        logger.debug(f"[LLM REQUEST] System: {system}")
-        logger.debug(f"[LLM REQUEST] User: {user}")
+        logger.info(f"[LLM REQUEST] System Prompt: {system}")
+        logger.info(f"[LLM REQUEST] User Prompt: {user}")
 
-        messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ]
+        # Robustness: Combine system and user for local servers if needed
+        if "localhost" in self.api_base:
+            messages = [{"role": "user", "content": f"SYSTEM: {system}\n\nUSER: {user}"}]
+        else:
+            messages = [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ]
 
         try:
             # Prepare arguments
@@ -131,24 +135,39 @@ class QueryLLM(State):
                 completion_args["api_key"] = self.api_key
             
             # Handle litellm's specific JSON mode if requested via params or post_process
-            if post_process == "extract_json":
+            # DISABLE for local servers as it often causes empty responses
+            if post_process == "extract_json" and "localhost" not in self.api_base:
                  completion_args["response_format"] = {"type": "json_object"}
 
             response = litellm.completion(**completion_args)
             content = response.choices[0].message.content
-            logger.debug(f"[LLM RESPONSE] Raw: {content}")
+            
+            logger.info(f"[LLM RESPONSE] Raw Content: {content}")
 
             # Post-Processing Logic
             if post_process == "extract_json":
-                # Robust extraction: find the first { and last }
-                json_match = re.search(r"(\{.*\})", content, re.DOTALL)
-                if json_match:
-                    try:
-                        return "SUCCESS", json.loads(json_match.group(1))
-                    except json.JSONDecodeError:
-                        pass
+                # Robust extraction: find the outermost { } pair
+                # This must happen BEFORE stripping <think> tokens just in case
+                # the model provided a valid JSON but put it inside/after think
+                start_index = content.find("{")
+                if start_index != -1:
+                    bracket_count = 0
+                    for i in range(start_index, len(content)):
+                        if content[i] == "{":
+                            bracket_count += 1
+                        elif content[i] == "}":
+                            bracket_count -= 1
+                            if bracket_count == 0:
+                                json_str = content[start_index : i + 1]
+                                try:
+                                    return "SUCCESS", json.loads(json_str)
+                                except json.JSONDecodeError:
+                                    break
+                
+                # Strip thinking tokens if present (common in Qwen models) and try again
+                cleaned_content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
                 try:
-                    return "SUCCESS", json.loads(content)
+                    return "SUCCESS", json.loads(cleaned_content)
                 except json.JSONDecodeError:
                     return "JSON_ERROR", content
 
@@ -161,6 +180,8 @@ class QueryLLM(State):
             return "SUCCESS", content
         except Exception as e:
             logger.error(f"QueryLLM Error: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return "ERROR", str(e)
 
 

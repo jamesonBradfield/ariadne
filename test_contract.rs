@@ -1,5 +1,5 @@
 #[test]
-fn test_new() {
+fn test_new_entity() {
     let entity = Entity::new();
     assert_eq!(entity.health, 100.0);
     assert_eq!(entity.armor, 50.0);
@@ -7,24 +7,16 @@ fn test_new() {
 }
 
 #[test]
-fn test_heal() {
-    let mut entity = Entity::new();
-    entity.heal(50.0);
-    assert_eq!(entity.health, 100.0);
-}
-
-#[test]
 fn test_take_damage() {
     let mut entity = Entity::new();
     entity.take_damage(50.0);
     assert_eq!(entity.health, 50.0);
-    assert!(!entity.is_dead);
 }
 
 #[test]
-fn test_take_damage_over_health() {
+fn test_heal() {
     let mut entity = Entity::new();
-    entity.take_damage(150.0);
-    assert_eq!(entity.health, 0.0);
-    assert!(entity.is_dead);
+    entity.take_damage(60.0);
+    entity.heal(20.0);
+    assert_eq!(entity.health, 60.0);
 }

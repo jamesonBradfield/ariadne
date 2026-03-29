@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from ariadne.core import EngineContext, State
 from ariadne.payloads import JobPayload
 from ariadne.primitives import QueryLLM, ASTSplice
-from ariadne.states import TRIAGE, DISPATCH, EVALUATE, SEARCH
+from ariadne.states import TRIAGE, DISPATCH, EVALUATE, THINKING, SEARCH, SENSE, CODING, SYNTAX_GATE, ACTUATE
 from ariadne.components import TreeSitterSensor, SyntaxGate
 
 # Setup logging
@@ -131,188 +131,6 @@ class IgnoreHandler:
         return any(pattern in path for pattern in self.ignore_patterns)
 
 
-class SenseState(State):
-    """
-    Acquires the exact AST coordinates for target symbols.
-    """
-    def __init__(self, profile):
-        super().__init__("SENSE")
-        self.profile = profile
-        self.sensor = TreeSitterSensor(profile.get_language_ptr())
-
-    def tick(self, job: JobPayload) -> Tuple[str, Any]:
-        if job.current_file_index >= len(job.target_files):
-            # If we reached the end and still haven't found anything to code, 
-            # and we just came from another SENSE tick, it's a failure.
-            logger.error(f"[{self.name}] Exhausted all files without finding any target symbols.")
-            return "ABORT", job
-
-        filepath = job.target_files[job.current_file_index]
-        job.extracted_nodes = []
-
-        # Use symbols from job.target_symbols (populated by SEARCH)
-        if not job.target_symbols:
-            logger.error(f"[{self.name}] No target symbols provided. Aborting.")
-            return "ABORT", job
-
-        for symbol in job.target_symbols:
-            query = self.profile.get_query(symbol)
-            node_data = self.sensor.extract_node(filepath, query, self.profile.target_capture_name)
-
-            if node_data:
-                node_data["symbol"] = symbol
-                job.extracted_nodes.append(node_data)
-                logger.info(f"[{self.name}] Target acquired in {filepath}: {symbol}")
-            else:
-                logger.warning(f"[{self.name}] Symbol not found in {filepath}: {symbol}")
-
-        if not job.extracted_nodes:
-            job.current_file_index += 1
-            return "SENSE", job
-
-        return "CODING", job
-
-
-class CodingState(State):
-    """
-    Uses LLM to rewrite the acquired AST nodes via strict JSON schema.
-    """
-    def __init__(self, config_manager: ConfigManager, profile: Any):
-        super().__init__("CODING")
-        self.config_manager = config_manager
-        self.config = config_manager.get_model_info("CODING")
-        self.llm = QueryLLM(model=self.config.get("model"), api_base=self.config.get("api_base"))
-        self.profile = profile
-
-    def tick(self, job: JobPayload) -> Tuple[str, Any]:
-        if not job.extracted_nodes:
-            return "SENSE", job
-
-        logger.info(f"[{self.name}] --- AMNESIC TICK: Fresh LLM Context for {job.target_files[job.current_file_index]} ---")
-
-        error_context = ""
-        if job.llm_feedback:
-            error_context += f"PREVIOUS ERROR: {job.llm_feedback}\n\n"
-        if hasattr(job, "test_stdout") and job.test_stdout:
-            error_context += f"TEST FAILURE (Fix this error in your rewrite):\n{job.test_stdout}\n\n"
-
-        context_str = ""
-        acquired_symbols = []
-        for node in job.extracted_nodes:
-            acquired_symbols.append(node['symbol'])
-            context_str += f"--- Symbol: {node['symbol']} ---\n{node['node_string']}\n\n"
-
-        variables = {
-            "language": self.profile.name,
-            "intent": job.intent,
-            "error_context": error_context,
-            "context_str": context_str,
-            "acquired_symbols": ", ".join(acquired_symbols),
-            "coding_example": self.profile.coding_example
-        }
-
-        system_prompt = self.config_manager.render_prompt(
-            self.config.get("system_prompt", ""), variables
-        )
-        user_prompt = self.config_manager.render_prompt(
-            self.config.get("user_prompt_template", ""), variables
-        )
-
-        status, response = self.llm.tick({
-            "system": system_prompt,
-            "user": user_prompt,
-            "params": self.config.get("params", {}),
-            "post_process": self.config.get("post_process")
-        })
-
-        if status != "SUCCESS":
-            logger.error(f"[{self.name}] LLM generation failed: {response}")
-            return "ABORT", job
-
-        job.fixed_code = response  # Now a dictionary with 'edits'
-        return "SYNTAX_GATE", job
-
-
-class SyntaxGateState(State):
-    """
-    Validates all generated code snippets before they touch the disk.
-    """
-    def __init__(self, profile):
-        super().__init__("SYNTAX_GATE")
-        self.gate = SyntaxGate(profile.get_language_ptr())
-
-    def tick(self, job: JobPayload) -> Tuple[str, Any]:
-        logger.info(f"[{self.name}] Validating surgical ASTs...")
-
-        if not isinstance(job.fixed_code, dict) or "edits" not in job.fixed_code:
-            job.llm_feedback = "Response must be a JSON object with an 'edits' array."
-            return "CODING", job
-
-        for edit in job.fixed_code["edits"]:
-            result = self.gate.validate(edit["new_code"])
-            if not result["valid"]:
-                error_msg = result['error_message']
-                symbol_name = edit.get('symbol', 'unknown')
-                logger.error(f"[{self.name}] Syntax validation failed for {symbol_name}: {error_msg}")
-                job.llm_feedback = f"Syntax error in {symbol_name}: {error_msg}"
-                return "CODING", job
-
-        job.llm_feedback = ""
-        return "ACTUATE", job
-
-
-class ActuateState(State):
-    """
-    Splices all valid edits into the file in reverse byte-order.
-    """
-    def __init__(self):
-        super().__init__("ACTUATE")
-        self.splicer = ASTSplice()
-
-    def tick(self, job: JobPayload) -> Tuple[str, Any]:
-        if not job.extracted_nodes:
-            logger.error(f"[{self.name}] No surgical target acquired! Aborting splice.")
-            return "ABORT", job
-
-        filepath = job.target_files[job.current_file_index]
-
-        edits_to_apply = []
-        provided_edits = job.fixed_code.get("edits", [])
-        acquired_symbol_names = [n["symbol"] for n in job.extracted_nodes]
-
-        for edit in provided_edits:
-            symbol = edit.get("symbol")
-            new_code = edit.get("new_code")
-            # Find the corresponding node data extracted in SENSE
-            node_data = next((n for n in job.extracted_nodes if n["symbol"] == symbol), None)
-            if node_data:
-                edits_to_apply.append({
-                    "start_byte": node_data["start_byte"],
-                    "end_byte": node_data["end_byte"],
-                    "new_code": new_code
-                })
-            else:
-                logger.warning(f"[{self.name}] LLM provided edit for symbol '{symbol}', but it was not in acquired list: {acquired_symbol_names}")
-
-        if not edits_to_apply:
-            logger.error(f"[{self.name}] No matching symbols found in edits! Provided: {[e.get('symbol') for e in provided_edits]}, Expected: {acquired_symbol_names}")
-            job.llm_feedback = f"Error: You provided edits for symbols we didn't acquire. Only edit these: {acquired_symbol_names}"
-            return "CODING", job
-
-        logger.info(f"[{self.name}] Splicing {len(edits_to_apply)} nodes in {filepath}")
-
-        status, result = self.splicer.tick({
-            "filepath": filepath,
-            "edits": edits_to_apply
-        })
-
-        if status == "SUCCESS":
-            return "EVALUATE", job
-        
-        logger.error(f"[{self.name}] Splice failed: {result}")
-        return "ABORT", job
-
-
 def main():
     parser = argparse.ArgumentParser(description="Ariadne ECU: Surgical Code Repair Engine")
     parser.add_argument("--targets", nargs="+", help="Files or directories to ingest")
@@ -347,14 +165,16 @@ def main():
             target_files=target_files
         ),
         "EVALUATE": EVALUATE(
-            test_command=f"python run_rust_tests.py {target_files[0]} test_contract{profile.extensions[0]}" 
+            test_command=f"python scripts/run_rust_tests.py {target_files[0]} test_contract{profile.extensions[0]}" 
             if profile.name == "Rust" else " ".join(profile.check_command)
         ),
+        "THINKING": THINKING(config_manager, profile),
         "SEARCH": SEARCH(config_manager, profile),
-        "SENSE": SenseState(profile),
-        "CODING": CodingState(config_manager, profile),
-        "SYNTAX_GATE": SyntaxGateState(profile),
-        "ACTUATE": ActuateState(),
+
+        "SENSE": SENSE(profile),
+        "CODING": CODING(config_manager, profile),
+        "SYNTAX_GATE": SYNTAX_GATE(profile),
+        "ACTUATE": ACTUATE(),
     }
 
     # 4. Initialize Engine Context

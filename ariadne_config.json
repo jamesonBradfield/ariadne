@@ -15,18 +15,19 @@
       "params": { "max_tokens": 50 }
     },
     "DISPATCH": {
-      "system_prompt": "You are a {{language}} test generator. Output ONLY #[test] functions. NO markdown. NO explanations. NO yapping. Output raw code only.",
+      "system_prompt": "You are a {{language}} test generator. Rules:\n1. ONLY pick names from the 'API Surface' provided.\n2. DO NOT invent new types or functions (e.g. if 'Entity' exists, DO NOT use 'Hero').\n3. Output ONLY #[test] functions. NO markdown. NO explanations.",
       "user_prompt_template": "Intent: {{intent}}\n\n{{language}} API Surface:\n{{skeleton_context}}",
       "post_process": "strip_markdown"
     },
-    "SEARCH": {
-      "system_prompt": "You are an architect. Analyze the intent and the error to identify which symbols to fix. Output ONLY a JSON object with a 'nodes' array of symbol names to fix. NO explanations. NO yapping. Rules:\n1. ONLY pick symbols from the 'Available Symbols' list.\n2. If a compiler error mentions a missing field, pick the PARENT struct or class from the list to modify it.\n3. DO NOT hallucinate new names.",
-      "user_prompt_template": "Intent: {{intent}}\n\nCompiler Error:\n{{test_stdout}}\n\nAvailable Symbols: {{available_symbols}}\n\nSkeletons:\n{{skeletons}}",
+    "THINKING": {
+      "system_prompt": "You are an Architect. Create a logical repair plan. Rules:\n1. Use ONLY names from 'Available Symbols'.\n2. Compare 'Test Code' and 'Skeletons' to find naming mismatches (e.g. Test uses 'Hero' but Source has 'Entity').\n3. Output RAW JSON: {\"reasoning\": \"...\", \"steps\": [{\"symbol\": \"...\"}]}",
+      "user_prompt_template": "Intent: {{intent}}\nTest Code: {{test_code}}\nErrors: {{test_stdout}}\nAvailable: {{available_symbols}}\nSkeletons: {{skeletons}}",
+      "params": { "max_tokens": 512 },
       "post_process": "extract_json"
     },
     "CODING": {
-      "system_prompt": "You are a surgical execution engine. Output ONLY a SINGLE JSON object with an 'edits' array. NO markdown. NO explanations. NO yapping. Only provide edits for symbols provided in the 'Acquired Symbols' list. Follow this example: {{coding_example}}",
-      "user_prompt_template": "Intent: {{intent}}\n\nAcquired Symbols: {{acquired_symbols}}\n\n{{error_context}}\n\nCode:\n{{context_str}}",
+      "system_prompt": "You are a surgical execution engine. Output ONLY a SINGLE JSON object with an 'edits' array. Rules:\n1. ONLY rewrite symbols listed in 'Acquired Symbols'.\n2. Fix the specific error mentioned in 'error_context'.\n3. NO markdown. NO explanations. NO yapping.",
+      "user_prompt_template": "Intent: {{intent}}\nAcquired Symbols: {{acquired_symbols}}\n{{error_context}}\nCode:\n{{context_str}}",
       "post_process": "extract_json"
     }
   }

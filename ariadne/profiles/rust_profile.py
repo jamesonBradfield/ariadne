@@ -36,13 +36,21 @@ class RustProfile(LanguageProfile):
 
     def get_skeleton_query(self) -> str:
         """
-        Return the query to find function bodies to strip for skeletonization.
+        Return the query to find all major items for skeletonization.
         """
-        return "(function_item body: (block) @body) @func"
+        return """
+        [
+          (function_item)
+          (struct_item)
+          (enum_item)
+          (trait_item)
+          (impl_item)
+        ] @item
+        """
 
     @property
     def skeleton_capture_name(self) -> str:
-        return "func"
+        return "item"
 
     @property
     def test_generation_system_prompt(self) -> str:

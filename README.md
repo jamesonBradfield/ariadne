@@ -10,25 +10,31 @@ Ariadne is a language-agnostic, AST-guided code repair engine designed for surgi
 - **Language Agnostic**: Modular "Language Profiles" (Rust, Python, etc.) allow for universal support with minimal configuration.
 - **Decoupled Configuration**: Control model selection, prompt templates, and post-processing per-state via `ariadne_config.json`.
 
-## 🏗️ Architecture
+## 🏗️ Architecture: The Self-Healing Cycle
 
-Ariadne operates as a state machine:
-1.  **TRIAGE**: Analyzes user intent.
-2.  **DISPATCH**: Generates a test contract to define the failure state.
-3.  **EVALUATE**: Runs the project's test suite and captures compiler/runtime errors.
-4.  **SEARCH**: Identifies the specific symbols (nodes) causing the failure.
-5.  **SENSE**: Acquires the exact byte coordinates of the target nodes.
-6.  **CODING**: Uses an LLM to generate surgical JSON-formatted patches.
-7.  **ACTUATE**: Splices the patches in reverse byte-order to maintain offset integrity.
+Ariadne operates as a deterministic **Hierarchical Finite State Machine (HFSM)**:
+1.  **TRIAGE**: Distills raw user intent into a precise technical objective.
+2.  **DISPATCH**: Generates a test contract that defines the expected behavior and failure state.
+3.  **EVALUATE**: Executes the test suite and captures the compiler or runtime output.
+4.  **THINKING (Architect)**: Analyzes the test failure and source skeletons to create a logical repair plan (resolving naming mismatches like `Hero` vs `Entity`).
+5.  **SEARCH**: Map the plan's symbols to the codebase.
+6.  **SENSE**: Acquires exact byte coordinates using Tree-sitter queries.
+7.  **CODING (Coder)**: Generates a surgical JSON patch for the specific AST nodes.
+8.  **SYNTAX_GATE**: Validates the generated code before it touches the disk.
+9.  **ACTUATE**: Splices the patch in reverse byte-order to maintain offset integrity.
 
-## 🛠️ Setup
+## 🛠️ Configuration & LLMs
 
-1.  Install dependencies:
-    ```bash
-    pip install -r requirements.txt
-    ```
-2.  Configure your LLM endpoints in `ariadne_config.json`.
-3.  Ensure you have your language-specific compilers (e.g., `rustc`, `python`) in your PATH.
+Ariadne is optimized for local `llama-server` and `Ollama` setups. Configure your models and prompts in `ariadne_config.json`:
+```json
+{
+  "default": {
+    "model": "openai/llama-cpp",
+    "api_base": "http://localhost:8080/v1"
+  }
+}
+```
+The engine is resilient to LLM "yapping" and thinking tokens (e.g., DeepSeek/Qwen), using robust JSON extraction logic to ensure reliable structured output.
 
 ## 📖 Usage
 

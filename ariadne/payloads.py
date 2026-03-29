@@ -14,3 +14,5 @@ class JobPayload:
     llm_feedback: str = ""
     retry_count: int = 0
     fixed_code: Any = None
+    plan: Dict[str, Any] = field(default_factory=dict)
+    plan_history: List[str] = field(default_factory=list)

@@ -33,13 +33,18 @@ class PythonProfile(LanguageProfile):
 
     def get_skeleton_query(self) -> str:
         """
-        Return the query to find function bodies to strip for skeletonization.
+        Return the query to find major items for skeletonization.
         """
-        return "(function_definition body: (block) @body) @func"
+        return """
+        [
+          (function_definition)
+          (class_definition)
+        ] @item
+        """
 
     @property
     def skeleton_capture_name(self) -> str:
-        return "func"
+        return "item"
 
     @property
     def test_generation_system_prompt(self) -> str:
