@@ -134,6 +134,7 @@ class IgnoreHandler:
 def main():
     parser = argparse.ArgumentParser(description="Ariadne ECU: Surgical Code Repair Engine")
     parser.add_argument("--targets", nargs="+", help="Files or directories to ingest")
+    parser.add_argument("--dir", default=".", help="Working directory of the target project")
     parser.add_argument("--profile", default="rust", help="Language profile to use")
     parser.add_argument("--config", default="ariadne_config.json", help="Path to LLM configuration JSON")
     parser.add_argument("--log-level", default="INFO", help="Logging level")
@@ -141,10 +142,18 @@ def main():
     parser.add_argument("--initial-state", default="TRIAGE", help="The starting state for the engine")
     args = parser.parse_args()
 
+    # Absolute path for config before we chdir
+    config_abs_path = os.path.abspath(args.config)
+
+    # Move into the target project directory
+    if args.dir != ".":
+        logger.info(f"Moving to target workspace: {args.dir}")
+        os.chdir(args.dir)
+
     logging.getLogger("ariadne").setLevel(args.log_level)
 
     # 1. Load Configuration and Profile
-    config_manager = ConfigManager(args.config)
+    config_manager = ConfigManager(config_abs_path)
     profile = ProfileLoader.load_profile(args.profile)
     
     # 2. Expand Targets

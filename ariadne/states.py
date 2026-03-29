@@ -159,10 +159,21 @@ class THINKING(State):
         if len(sym_summary) > 200:
             sym_summary = sym_summary[:200] + "... [TRUNCATED]"
 
+        # Read the test content that failed
+        test_content = "Unknown"
+        if job.read_only_tests:
+            try:
+                with open(job.read_only_tests[0], "r") as f:
+                    test_content = f.read()
+            except Exception:
+                pass
+
         variables = {
             "intent": job.intent[:500], # Don't let intent bloat
             "available_symbols": sym_summary,
-            "test_stdout": job.test_stdout[:500] if job.test_stdout else "No errors yet.",
+            "test_code": test_content[:1000],
+            "test_stdout": job.test_stdout[:1000] if job.test_stdout else "No errors yet.",
+            "skeletons": "\n".join(all_skeletons)[:2000],
             "retry_count": job.retry_count,
             "has_test": "Yes" if job.read_only_tests else "No"
         }

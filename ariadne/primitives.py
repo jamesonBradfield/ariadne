@@ -158,6 +158,10 @@ class QueryLLM(State):
             message = response.choices[0].message
             content = message.content or ""
             
+            # 1. CLEANING: Aggressively strip thinking tags regardless of post-process mode
+            content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+            content = content.replace("</think>", "").replace("<think>", "").strip()
+
             # Log reasoning if present, but truncated
             r_log = ""
             if hasattr(message, "reasoning_content") and message.reasoning_content:

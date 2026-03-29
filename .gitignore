@@ -1,1 +1,9 @@
 .venv
+__pycache__/
+target/
+**/target/
+*.pyc
+*.exe
+*.dll
+*.so
+.DS_Store
