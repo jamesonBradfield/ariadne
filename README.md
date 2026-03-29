@@ -50,4 +50,4 @@ python engine.py --targets src/main.rs --intent "Add error handling to the proce
 - `--profile`: Specify the language profile (default: `rust`).
 
 ## 📜 License
-MIT
+GPL v3
