@@ -1,0 +1,28 @@
+{
+  "mcpServers": {
+    "pare-git": {
+      "command": "npx",
+      "args": ["-y", "@paretools/git"]
+    },
+    "pare-test": {
+      "command": "npx",
+      "args": ["-y", "@paretools/test"]
+    },
+    "context7": {
+      "command": "npx",
+      "args": ["-y", "@upstash/context7-mcp", "--transport", "stdio"]
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "C:\\Users\\Jamie\\projects\\ariadne"
+      ]
+    },
+    "stripfeed": {
+      "command": "npx",
+      "args": ["-y", "@stripfeed/mcp-server"]
+    }
+  }
+}

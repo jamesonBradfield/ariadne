@@ -1,0 +1,31 @@
+name: Ariadne CI Benchmarks
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install tree-sitter tree-sitter-rust tree-sitter-python
+        
+    - name: Run Eval Runner
+      env:
+        ARIADNE_MODEL: ${{ secrets.ARIADNE_MODEL }}
+        ARIADNE_API_KEY: ${{ secrets.ARIADNE_API_KEY }}
+        ARIADNE_API_BASE: ${{ secrets.ARIADNE_API_BASE }}
+      run: python scripts/eval_runner.py

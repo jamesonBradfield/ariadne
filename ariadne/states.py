@@ -206,7 +206,7 @@ class THINKING(State):
             reasoning = plan.get('reasoning', 'No reasoning provided')
             job.plan_history.append(reasoning) # Track history
             logger.info(f"[{self.name}] Generated Plan: {reasoning}")
-            return "SEARCH", job
+            return "ROUTER", job
         
         logger.error(f"[{self.name}] Failed to generate logical plan. Status: {status}, Plan Type: {type(plan)}")
         if status != "SUCCESS":
@@ -214,6 +214,62 @@ class THINKING(State):
         else:
              logger.error(f"[{self.name}] Non-dict plan received. Raw content (truncated): {str(plan)[:500]}")
              
+        return "ABORT", job
+
+class ROUTER(State):
+    """
+    Orchestrator: Decides the next state dynamically based on context, errors, and plans.
+    """
+    def __init__(self, config_manager: Any):
+        super().__init__("ROUTER")
+        self.config_manager = config_manager
+        self.config = config_manager.get_model_info("ROUTER")
+        self.query_llm = QueryLLM(model=self.config.get("model"), api_base=self.config.get("api_base"))
+        self.valid_transitions = ["SEARCH", "DISPATCH", "MAPS", "THINKING", "ABORT"]
+
+    def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
+        # Read the test content that failed
+        test_content = "Unknown"
+        if job.read_only_tests:
+            try:
+                with open(job.read_only_tests[0], "r") as f:
+                    test_content = f.read()
+            except Exception:
+                pass
+
+        import json
+        variables = {
+            "intent": job.intent,
+            "retry_count": job.retry_count,
+            "test_stdout": job.test_stdout[:1000] + "... [TRUNCATED]" if len(job.test_stdout) > 1000 else job.test_stdout,
+            "llm_feedback": job.llm_feedback,
+            "plan": json.dumps(job.plan)
+        }
+        
+        system_prompt = self.config_manager.render_prompt(self.config.get("system_prompt", ""), variables)
+        user_prompt = self.config_manager.render_prompt(self.config.get("user_prompt_template", ""), variables)
+
+        status, response = self.query_llm.tick({
+            "system": system_prompt,
+            "user": user_prompt,
+            "params": self.config.get("params", {}),
+            "post_process": "extract_json"
+        })
+
+        if status == "SUCCESS" and isinstance(response, dict):
+            next_state = response.get("next_state", "").upper()
+            reasoning = response.get("reasoning", "No reasoning provided")
+            logger.info(f"[{self.name}] Decision: {next_state} | Reasoning: {reasoning}")
+            
+            if next_state in self.valid_transitions:
+                # Clear transient feedback before transitioning
+                job.llm_feedback = ""
+                return next_state, job
+            else:
+                logger.error(f"[{self.name}] Invalid next_state requested: {next_state}. Defaulting to ABORT.")
+                return "ABORT", job
+
+        logger.error(f"[{self.name}] Failed to get routing decision. Status: {status}")
         return "ABORT", job
 
 class SEARCH(State):
@@ -273,24 +329,99 @@ class SENSE(State):
             job.current_file_index += 1
             return "SENSE", job
 
-        return "CODING", job
+        return "MAPS", job
 
-class CODING(State):
+class MAPS(State):
     """
-    Uses LLM to rewrite the acquired AST nodes via strict JSON schema.
+    Micro AST Procedural Surgeon: Navigates AST recursively for precise byte-edits.
     """
     def __init__(self, config_manager: Any, profile: Any):
-        super().__init__("CODING")
+        super().__init__("MAPS")
         self.config_manager = config_manager
-        self.config = config_manager.get_model_info("CODING")
+        self.config = config_manager.get_model_info("MAPS")
         self.llm = QueryLLM(model=self.config.get("model"), api_base=self.config.get("api_base"))
         self.profile = profile
+
+    def _render_node(self, source_code: bytes, node: Any, max_lines: int = 3) -> str:
+        text = source_code[node.start_byte:node.end_byte].decode("utf8")
+        lines = text.splitlines()
+        if len(lines) > max_lines:
+            return f"{lines[0]}\n... [{len(lines)-2} lines hidden] ...\n{lines[-1]}"
+        return text
 
     def tick(self, job: JobPayload) -> Tuple[str, Any]:
         if not job.extracted_nodes:
             return "SENSE", job
 
-        logger.info(f"[{self.name}] --- AMNESIC TICK: Fresh LLM Context for {job.target_files[job.current_file_index]} ---")
+        if not hasattr(job, "maps_state"):
+            job.maps_state = {
+                "current_target_index": 0,
+                "node_history": [] # Stack of (start_byte, end_byte)
+            }
+            job.fixed_code = {"edits": []}
+
+        if job.maps_state["current_target_index"] >= len(job.extracted_nodes):
+            # We finished navigating all symbols
+            del job.maps_state
+            return "SYNTAX_GATE", job
+
+        filepath = job.target_files[job.current_file_index]
+        target_info = job.extracted_nodes[job.maps_state["current_target_index"]]
+        current_symbol = target_info["symbol"]
+
+        # 1. Parse the file
+        with open(filepath, "rb") as f:
+            source_bytes = f.read()
+
+        import tree_sitter
+        language_ptr = self.profile.get_language_ptr()
+        try:
+            lang = tree_sitter.Language(language_ptr)
+        except Exception:
+            lang = language_ptr
+        parser = tree_sitter.Parser(lang)
+        tree = parser.parse(source_bytes)
+
+        # 2. Determine current navigation node
+        current_start = target_info["start_byte"]
+        current_end = target_info["end_byte"]
+
+        if job.maps_state["node_history"]:
+            current_start, current_end = job.maps_state["node_history"][-1]
+
+        def find_node(node, start, end):
+            if node.start_byte == start and node.end_byte == end:
+                return node
+            for child in node.children:
+                if child.start_byte <= start and child.end_byte >= end:
+                    res = find_node(child, start, end)
+                    if res: return res
+            return None
+
+        current_node = find_node(tree.root_node, current_start, current_end)
+        
+        if not current_node:
+            logger.error(f"[{self.name}] Could not find node at {current_start}-{current_end} in {filepath}")
+            # Recovery: jump back up
+            if job.maps_state["node_history"]:
+                job.maps_state["node_history"].pop()
+                return "MAPS", job
+            else:
+                job.maps_state["current_target_index"] += 1
+                return "MAPS", job
+
+        # 3. Render children
+        children_view = []
+        node_map = {} # id -> node
+        
+        for idx, child in enumerate(current_node.named_children):
+            node_map[idx] = child
+            rendered = self._render_node(source_bytes, child)
+            children_view.append(f"[{idx}] {child.type}:\n{rendered}\n")
+
+        children_view_str = "\n".join(children_view) if children_view else "(No named children)"
+
+        logger.info(f"[{self.name}] Navigating {current_symbol} | Depth: {len(job.maps_state['node_history'])} | Node: {current_node.type}")
 
         error_context = ""
         if job.llm_feedback:
@@ -298,19 +429,12 @@ class CODING(State):
         if hasattr(job, "test_stdout") and job.test_stdout:
             error_context += f"TEST FAILURE (Fix this error in your rewrite):\n{job.test_stdout}\n\n"
 
-        context_str = ""
-        acquired_symbols = []
-        for node in job.extracted_nodes:
-            acquired_symbols.append(node['symbol'])
-            context_str += f"--- Symbol: {node['symbol']} ---\n{node['node_string']}\n\n"
-
         variables = {
-            "language": self.profile.name,
             "intent": job.intent,
             "error_context": error_context,
-            "context_str": context_str,
-            "acquired_symbols": ", ".join(acquired_symbols),
-            "coding_example": self.profile.coding_example
+            "current_symbol": current_symbol,
+            "current_node_type": current_node.type,
+            "children_view": children_view_str,
         }
 
         system_prompt = self.config_manager.render_prompt(self.config.get("system_prompt", ""), variables)
@@ -327,8 +451,60 @@ class CODING(State):
             logger.error(f"[{self.name}] LLM generation failed: {response}")
             return "ABORT", job
 
-        job.fixed_code = response  # Now a dictionary with 'edits'
-        return "SYNTAX_GATE", job
+        job.llm_feedback = "" # Clear previous feedback
+
+        # 4. Handle LLM Action
+        action = response.get("action")
+        target_idx = response.get("target")
+        code = response.get("code", "")
+
+        logger.info(f"[{self.name}] LLM Action: {action} on target {target_idx}")
+
+        if action == "zoom":
+            if target_idx is not None and target_idx in node_map:
+                target_node = node_map[target_idx]
+                job.maps_state["node_history"].append((target_node.start_byte, target_node.end_byte))
+            else:
+                job.llm_feedback = f"Invalid target ID {target_idx} for zoom."
+        elif action == "up":
+            if job.maps_state["node_history"]:
+                job.maps_state["node_history"].pop()
+            else:
+                job.llm_feedback = "Already at the top level of the extracted symbol."
+        elif action in ["replace", "insert_before", "insert_after", "delete"]:
+            if target_idx is not None and target_idx in node_map:
+                target_node = node_map[target_idx]
+                edit = {
+                    "symbol": current_symbol,
+                    "action": action,
+                    "new_code": code
+                }
+                if action == "replace":
+                    edit["start_byte"] = target_node.start_byte
+                    edit["end_byte"] = target_node.end_byte
+                elif action == "insert_before":
+                    edit["start_byte"] = target_node.start_byte
+                    edit["end_byte"] = target_node.start_byte
+                elif action == "insert_after":
+                    edit["start_byte"] = target_node.end_byte
+                    edit["end_byte"] = target_node.end_byte
+                elif action == "delete":
+                    edit["start_byte"] = target_node.start_byte
+                    edit["end_byte"] = target_node.end_byte
+                    edit["new_code"] = "" # Empty code for delete
+                    
+                job.fixed_code["edits"].append(edit)
+                logger.info(f"[{self.name}] Queued {action} edit at {edit['start_byte']}-{edit['end_byte']}")
+                job.llm_feedback = f"Successfully queued {action} on node {target_idx}."
+            else:
+                job.llm_feedback = f"Invalid target ID {target_idx} for {action}."
+        elif action == "done":
+            job.maps_state["current_target_index"] += 1
+            job.maps_state["node_history"] = [] # Reset history for next symbol
+        else:
+            job.llm_feedback = f"Unknown action: {action}"
+
+        return "MAPS", job
 
 class SYNTAX_GATE(State):
     """
@@ -343,7 +519,7 @@ class SYNTAX_GATE(State):
 
         if not isinstance(job.fixed_code, dict) or "edits" not in job.fixed_code:
             job.llm_feedback = "Response must be a JSON object with an 'edits' array."
-            return "CODING", job
+            return "MAPS", job
 
         for edit in job.fixed_code["edits"]:
             result = self.gate.validate(edit["new_code"])
@@ -352,7 +528,7 @@ class SYNTAX_GATE(State):
                 symbol_name = edit.get('symbol', 'unknown')
                 logger.error(f"[{self.name}] Syntax validation failed for {symbol_name}: {error_msg}")
                 job.llm_feedback = f"Syntax error in {symbol_name}: {error_msg}"
-                return "CODING", job
+                return "ROUTER", job
 
         job.llm_feedback = ""
         return "ACTUATE", job
@@ -392,7 +568,7 @@ class ACTUATE(State):
         if not edits_to_apply:
             logger.error(f"[{self.name}] No matching symbols found in edits! Provided: {[e.get('symbol') for e in provided_edits]}, Expected: {acquired_symbol_names}")
             job.llm_feedback = f"Error: You provided edits for symbols we didn't acquire. Only edit these: {acquired_symbol_names}"
-            return "CODING", job
+            return "ROUTER", job
 
         logger.info(f"[{self.name}] Splicing {len(edits_to_apply)} nodes in {filepath}")
 
@@ -405,4 +581,5 @@ class ACTUATE(State):
             return "EVALUATE", job
         
         logger.error(f"[{self.name}] Splice failed: {result}")
-        return "ABORT", job
+        job.llm_feedback = f"Splice failed: {result}"
+        return "ROUTER", job

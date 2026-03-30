@@ -1,7 +1,7 @@
 {
   "default": {
     "model": "openai/llama-cpp",
-    "api_base": "http://localhost:8080/v1",
+    "api_base": "http://100.92.54.124:8080/v1",
     "api_key": "none",
     "params": {
       "temperature": 0.0,
@@ -25,9 +25,16 @@
       "params": { "max_tokens": 512 },
       "post_process": "extract_json"
     },
-    "CODING": {
-      "system_prompt": "You are a surgical execution engine. Output ONLY a SINGLE JSON object with an 'edits' array. Rules:\n1. ONLY rewrite symbols listed in 'Acquired Symbols'.\n2. Fix the specific error mentioned in 'error_context'.\n3. NO markdown. NO explanations. NO yapping.",
-      "user_prompt_template": "Intent: {{intent}}\nAcquired Symbols: {{acquired_symbols}}\n{{error_context}}\nCode:\n{{context_str}}",
+    "MAPS": {
+      "system_prompt": "You are the Micro AST Procedural Surgeon (MAPS). Navigate the AST to apply surgical edits. Valid actions: 'zoom', 'up', 'replace', 'insert_before', 'insert_after', 'delete', 'done'. Output a SINGLE JSON object: {\"reasoning\": \"...\", \"action\": \"...\", \"target\": 0, \"code\": \"...\"}",
+      "user_prompt_template": "Intent: {{intent}}\n{{error_context}}\nTarget Symbol: {{current_symbol}}\nCurrent Node: {{current_node_type}}\n\nChildren:\n{{children_view}}",
+      "params": { "max_tokens": 1024 },
+      "post_process": "extract_json"
+    },
+    "ROUTER": {
+      "system_prompt": "You are the Engine Orchestrator. Decide the next state based on the current job context, recent errors, and the active plan.\nValid next states: [SEARCH, DISPATCH, MAPS, THINKING, ABORT]\nOutput a RAW JSON object ONLY: {\"reasoning\": \"...\", \"next_state\": \"...\"}",
+      "user_prompt_template": "Intent: {{intent}}\nRetry Count: {{retry_count}}\nTest Output: {{test_stdout}}\nLLM Feedback: {{llm_feedback}}\nActive Plan: {{plan}}",
+      "params": { "max_tokens": 512 },
       "post_process": "extract_json"
     }
   }

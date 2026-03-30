@@ -128,6 +128,7 @@ class QueryLLM(State):
                 "model": self.model,
                 "messages": messages,
                 "api_base": self.api_base,
+                "timeout": 300,
             }
             completion_args.update(params)
             
@@ -172,10 +173,12 @@ class QueryLLM(State):
                     return "JSON_ERROR", content
 
             if post_process == "strip_markdown":
-                code_match = re.search(r"```(?:\w+)?\n(.*?)\n```", content, re.DOTALL)
+                # Strip thinking tokens if present
+                cleaned_content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+                code_match = re.search(r"```(?:\w+)?\n(.*?)\n```", cleaned_content, re.DOTALL)
                 if code_match:
                     return "SUCCESS", code_match.group(1).strip()
-                return "SUCCESS", content.strip("`").strip()
+                return "SUCCESS", cleaned_content.strip("`").strip()
 
             return "SUCCESS", content
         except Exception as e:

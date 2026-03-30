@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from ariadne.core import EngineContext, State
 from ariadne.payloads import JobPayload
 from ariadne.primitives import QueryLLM, ASTSplice
-from ariadne.states import TRIAGE, DISPATCH, EVALUATE, THINKING, SEARCH, SENSE, CODING, SYNTAX_GATE, ACTUATE
+from ariadne.states import TRIAGE, DISPATCH, EVALUATE, THINKING, ROUTER, SEARCH, SENSE, MAPS, SYNTAX_GATE, ACTUATE
 from ariadne.components import TreeSitterSensor, SyntaxGate
 
 # Setup logging
@@ -166,13 +166,14 @@ def main():
         ),
         "EVALUATE": EVALUATE(
             test_command=f"python scripts/run_rust_tests.py {target_files[0]} test_contract{profile.extensions[0]}" 
-            if profile.name == "Rust" else " ".join(profile.check_command)
+            if profile.name == "Rust" else f"python scripts/run_python_tests.py {target_files[0]} test_contract{profile.extensions[0]}"
         ),
         "THINKING": THINKING(config_manager, profile),
+        "ROUTER": ROUTER(config_manager),
         "SEARCH": SEARCH(config_manager, profile),
 
         "SENSE": SENSE(profile),
-        "CODING": CODING(config_manager, profile),
+        "MAPS": MAPS(config_manager, profile),
         "SYNTAX_GATE": SYNTAX_GATE(profile),
         "ACTUATE": ACTUATE(),
     }
