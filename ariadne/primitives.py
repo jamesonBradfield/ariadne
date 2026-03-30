@@ -225,7 +225,13 @@ class PromptUser(State):
         super().__init__("PROMPT_USER")
 
     def tick(self, proposal: str) -> Tuple[str, bool]:
+        import os
         print(f"\n[PROPOSAL]\n{proposal}\n")
+        
+        if os.getenv("ARIADNE_AUTO_ACCEPT") == "true":
+            print("Auto-accepting proposal due to ARIADNE_AUTO_ACCEPT=true")
+            return "ACCEPTED", True
+
         while True:
             choice = input("Proceed? (y/n): ").strip().lower()
             if choice in ["y", "yes"]:
