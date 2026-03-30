@@ -26,7 +26,7 @@ def test_maps_state_transition(temp_rust_file):
         "system_prompt": "sys",
         "user_prompt_template": "user",
         "params": {},
-        "post_process": "extract_json"
+        "post_process": "extract_search_replace"
     }
     config_manager.render_prompt.side_effect = lambda template, vars: template
 
@@ -38,7 +38,10 @@ def test_maps_state_transition(temp_rust_file):
 
     # Define mock responses
     responses = {
-        "MAPS": {"action": "replace", "target": 0, "code": "fn foo() { println!(\"fixed\"); }"}
+        "MAPS": {
+            "search": "fn foo() {\n    // some comment\n}",
+            "replace": "fn foo() {\n    println!(\"fixed\");\n}"
+        }
     }
     mock_llm = MockQueryLLM(responses=responses)
     
@@ -46,13 +49,12 @@ def test_maps_state_transition(temp_rust_file):
     maps_state.llm = mock_llm
 
     # Setup JobPayload
-    # We need to find the byte offsets for 'foo' in our temp file.
-    # fn main() { ... } is bytes 0 to ~25
-    # fn foo() { ... } starts after that.
     with open(temp_rust_file, "rb") as f:
         content = f.read()
         foo_start = content.find(b"fn foo")
         foo_end = content.find(b"}", foo_start) + 1
+
+    node_string = content[foo_start:foo_end].decode("utf-8")
 
     job = JobPayload(
         intent="fix foo",
@@ -61,24 +63,21 @@ def test_maps_state_transition(temp_rust_file):
         extracted_nodes=[{
             "symbol": "foo",
             "start_byte": foo_start,
-            "end_byte": foo_end
+            "end_byte": foo_end,
+            "node_string": node_string
         }]
     )
 
-    # First tick: Execute 'replace'
+    # First tick: Executes Search/Replace block extraction
     status, updated_job = maps_state.tick(job)
     assert status == "MAPS"
     assert len(job.fixed_code["edits"]) == 1
-    assert job.fixed_code["edits"][0]["action"] == "replace"
-    assert job.fixed_code["edits"][0]["new_code"] == "fn foo() { println!(\"fixed\"); }"
-
-    # Second tick: LLM returns 'done'
-    mock_llm.responses["MAPS"] = {"action": "done"}
-    status, updated_job = maps_state.tick(job)
-    assert status == "MAPS"
+    assert job.fixed_code["edits"][0]["search_text"] == "fn foo() {\n    // some comment\n}"
+    assert job.fixed_code["edits"][0]["replace_text"] == "fn foo() {\n    println!(\"fixed\");\n}"
     assert job.maps_state["current_target_index"] == 1
 
-    # Third tick: Should transition to SYNTAX_GATE
+    # Second tick: Should transition to SYNTAX_GATE since we exhausted extracted nodes
     status, updated_job = maps_state.tick(job)
     assert status == "SYNTAX_GATE"
     assert not hasattr(job, "maps_state")
+

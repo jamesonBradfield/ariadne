@@ -180,6 +180,16 @@ class QueryLLM(State):
                     return "SUCCESS", code_match.group(1).strip()
                 return "SUCCESS", cleaned_content.strip("`").strip()
 
+            if post_process == "extract_search_replace":
+                cleaned_content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+                # Find blocks using regex
+                match = re.search(r"<<<<\n(.*?)\n====\n(.*?)\n>>>>", cleaned_content, re.DOTALL)
+                if match:
+                    search_text = match.group(1)
+                    replace_text = match.group(2)
+                    return "SUCCESS", {"search": search_text, "replace": replace_text}
+                return "SEARCH_REPLACE_ERROR", content
+
             return "SUCCESS", content
         except Exception as e:
             logger.error(f"QueryLLM Error: {e}")
@@ -309,4 +319,58 @@ class ASTSplice(State):
             return "SUCCESS", filepath
         except Exception as e:
             logger.error(f"ASTSplice Error: {e}")
+            return "ERROR", str(e)
+
+
+class BlockSplice(State):
+    """
+    Surgical string replacement within a specific AST node's byte range.
+    Input Payload: Dict with 'filepath', 'edits' (list of dicts with 'start_byte', 'end_byte', 'search_text', 'replace_text').
+    Returns: Tuple[str, str] (status, filepath)
+    """
+
+    def __init__(self):
+        super().__init__("BLOCK_SPLICE")
+
+    def tick(self, payload: Dict[str, Any]) -> Tuple[str, str]:
+        filepath = payload.get("filepath")
+        edits = payload.get("edits", [])
+
+        if not edits:
+            return "SUCCESS", filepath
+
+        # Sort edits in reverse order (bottom-up) to prevent byte offset corruption
+        edits.sort(key=lambda x: x["start_byte"], reverse=True)
+
+        try:
+            with open(filepath, "rb") as f:
+                full_source = f.read()
+
+            new_source_code = full_source
+
+            for edit in edits:
+                search_bytes = edit["search_text"].encode("utf-8")
+                replace_bytes = edit["replace_text"].encode("utf-8")
+                start_byte = edit["start_byte"]
+                end_byte = edit["end_byte"]
+
+                node_bytes = new_source_code[start_byte:end_byte]
+                
+                # Perform replace within the node boundaries
+                if search_bytes not in node_bytes:
+                    logger.error(f"BlockSplice rejected: search_text not found in target node.")
+                    return "REJECTED", "search_text not found in node"
+
+                new_node_bytes = node_bytes.replace(search_bytes, replace_bytes, 1)
+
+                before = new_source_code[:start_byte]
+                after = new_source_code[end_byte:]
+                new_source_code = before + new_node_bytes + after
+
+            with open(filepath, "wb") as f:
+                f.write(new_source_code)
+
+            return "SUCCESS", filepath
+        except Exception as e:
+            logger.error(f"BlockSplice Error: {e}")
             return "ERROR", str(e)

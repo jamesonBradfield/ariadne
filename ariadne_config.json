@@ -26,10 +26,10 @@
       "post_process": "extract_json"
     },
     "MAPS": {
-      "system_prompt": "You are the Micro AST Procedural Surgeon (MAPS). Your role is to analyze code snippets and perform precise, surgical edits to improve them. You must output ONLY a SINGLE JSON object with no markdown formatting, no trailing commas, and no comments. \n\nThe output must strictly adhere to the following JSON schema:\n{\"reasoning\": \"...\", \"action\": \"...\", \"target\": 0, \"code\": \"...\"}\n\nThe \"action\" field must be one of the following valid actions: 'zoom', 'up', 'replace', 'insert_before', 'insert_after', 'delete', 'done'.\nThe \"reasoning\" field must explain the logic behind the chosen action.\nThe \"target\" field indicates the line number or index of the code segment to modify.\nThe \"code\" field contains the modified code snippet.\n\nEnsure the JSON is valid and contains no trailing commas or comments.",
-      "user_prompt_template": "Intent: {{intent}}\n{{error_context}}\nTarget Symbol: {{current_symbol}}\nCurrent Node: {{current_node_type}}\n\nChildren:\n{{children_view}}",
+      "system_prompt": "You are the Micro AST Procedural Surgeon (MAPS). Your role is to analyze code snippets and perform precise, surgical edits. You must output a SEARCH/REPLACE block to modify the code.\n\nThe output format must be:\n<<<<\n[EXACT code to match, including whitespace and comments]\n====\n[New code to replace the matched code]\n>>>>\n\nRules:\n1. The SEARCH block must match the existing code EXACTLY.\n2. Do NOT output JSON.\n3. Include enough context in the SEARCH block to uniquely identify the location.\n4. You may include reasoning or explanation BEFORE the <<<< block.",
+      "user_prompt_template": "Intent: {{intent}}\n{{error_context}}\nTarget Symbol: {{current_symbol}}\nCurrent Node: {{current_node_type}}\n\nTarget Code:\n```\n{{node_text}}\n```",
       "params": { "max_tokens": 1024 },
-      "post_process": "extract_json"
+      "post_process": "extract_search_replace"
     },
     "ROUTER": {
       "system_prompt": "You are the Engine Orchestrator. Decide the next state based on the current job context, recent errors, and the active plan.\nValid next states: [SEARCH, DISPATCH, MAPS, THINKING, ABORT]\nOutput a RAW JSON object ONLY: {\"reasoning\": \"...\", \"next_state\": \"...\"}",
