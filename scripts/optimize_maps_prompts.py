@@ -42,8 +42,8 @@ class EngineWrapper:
 
 class MapsLoss(tg.loss.Module):
     """
-    Custom Loss Function for MAPS state.
-    Evaluates LLM output via SyntaxGate and index validation.
+    Custom Loss Function for MAPS state using Markdown SEARCH/REPLACE blocks.
+    Evaluates LLM output via existence of blocks and matching content.
     """
     def __init__(self, language_ptr):
         super().__init__()
@@ -51,61 +51,42 @@ class MapsLoss(tg.loss.Module):
 
     def forward(self, response_variable: tg.Variable, context: Dict[str, Any]) -> tg.Variable:
         response_text = response_variable.value
-        children_view_str = context.get("children_view", "")
+        node_text = context.get("node_text", "")
         
-        # 1. Parse JSON
-        try:
-            start_index = response_text.find("{")
-            end_index = response_text.rfind("}")
-            if start_index == -1 or end_index == -1:
-                return tg.Variable(
-                    "CRITICAL FAILURE: The model did not output any JSON object. "
-                    "The system prompt MUST strictly command the model to output ONLY a raw JSON object and forbid markdown or conversational text.",
-                    role_description="feedback"
-                )
-            
-            json_str = response_text[start_index : end_index + 1]
-            data = json.loads(json_str)
-        except Exception as e:
+        # 1. Extract SEARCH/REPLACE blocks
+        search_pattern = r"<<<<\n(.*?)\n====\n(.*?)\n>>>>"
+        matches = re.findall(search_pattern, response_text, re.DOTALL)
+        
+        if not matches:
             return tg.Variable(
-                f"JSON PARSE FAILURE: The model produced invalid JSON (Error: {str(e)}). "
-                f"The system prompt needs to be extremely explicit about formatting. It must demand a perfectly formatted JSON object with double quotes for keys and no trailing commas.",
+                "CRITICAL FAILURE: No SEARCH/REPLACE block found. "
+                "The output MUST contain a block starting with '<<<<', separated by '====', and ending with '>>>>'. "
+                "Ensure the block is formatted exactly as specified in the system prompt.",
                 role_description="feedback"
             )
 
-        action = data.get("action")
-        target_idx = data.get("target")
-        code = data.get("code", "")
-
         feedback = []
-
-        # 2. Check Syntax
-        if action in ["replace", "insert_before", "insert_after"]:
-            res = self.syntax_gate.validate(code)
-            if not res["valid"]:
-                feedback.append(
-                    f"SYNTAX ERROR: The code snippet provided by the model is invalid.\n"
-                    f"Error: {res['error_message']}\n"
-                    f"Code: {code}\n"
-                    f"The system prompt MUST remind the model to generate syntactically correct code for the language being edited."
-                )
-
-        # 3. Check Index Bounds
-        import re
-        indices = re.findall(r"\[(\d+)\]", children_view_str)
-        max_idx = max(int(i) for i in indices) if indices else -1
         
-        if target_idx is not None:
-            if target_idx < 0 or target_idx > max_idx:
+        for search_text, replace_text in matches:
+            # 2. Check if SEARCH text exists in node_text
+            if search_text not in node_text:
                 feedback.append(
-                    f"INDEX ERROR: Target index {target_idx} is out of bounds (max index: {max_idx}). "
-                    f"The system prompt should instruct the model to only use the target IDs provided in the 'Children View'."
+                    f"SEARCH ERROR: The SEARCH block text was not found exactly within the target code. "
+                    f"Expected substring:\n{search_text}\n"
+                    f"Actual target code:\n{node_text}\n"
+                    f"The model must copy the code EXACTLY, including all whitespace, indentation, and comments."
                 )
-        elif action != "done" and action != "up":
-            feedback.append("VALIDATION ERROR: 'target' index is missing. The prompt must enforce that 'target' is required for editing actions.")
+
+            # 3. Check Syntax of REPLACE text (optional/best-effort)
+            # Since replace_text might be a fragment, we'll try to validate it in context
+            # but for now, we just check if it's empty when it shouldn't be.
+            if not replace_text.strip() and search_text.strip():
+                 # This might be a deletion, which is valid, but let's warn if intent wasn't deletion
+                 if "remove" not in context.get("intent", "").lower() and "delete" not in context.get("intent", "").lower():
+                     feedback.append("WARNING: REPLACE block is empty but intent does not seem to be deletion.")
 
         if not feedback:
-            return tg.Variable("SUCCESS: The output is valid, syntactically correct, and follows all rules.", role_description="feedback")
+            return tg.Variable("SUCCESS: The output contains a valid SEARCH/REPLACE block that matches the target code.", role_description="feedback")
         
         return tg.Variable("\n".join(feedback), role_description="feedback")
 
@@ -130,11 +111,12 @@ def run_optimization():
         role_description="system prompt for the Micro AST Procedural Surgeon (MAPS) state"
     )
 
-    # ADDING CONSTRAINTS to prevent the model from forgetting the JSON format
+    # UPDATED CONSTRAINTS for SEARCH/REPLACE
     constraints = [
-        "The prompt MUST explicitly state that the output should be ONLY a SINGLE JSON object, with no markdown formatting.",
-        "The prompt MUST explicitly list the valid actions: 'zoom', 'up', 'replace', 'insert_before', 'insert_after', 'delete', 'done'.",
-        "The prompt MUST provide the exact JSON schema to follow: {\"reasoning\": \"...\", \"action\": \"...\", \"target\": 0, \"code\": \"...\"}."
+        "The prompt MUST explicitly state the SEARCH/REPLACE format: <<<<, ====, >>>>.",
+        "The prompt MUST emphasize that the SEARCH block MUST match the target code EXACTLY, bit-for-bit.",
+        "The prompt MUST forbid JSON output.",
+        "The prompt SHOULD suggest including some context lines in the SEARCH block to ensure uniqueness."
     ]
 
     optimizer = tg.TGD(parameters=[system_prompt], new_variable_tags=tags, constraints=constraints)
@@ -145,45 +127,45 @@ def run_optimization():
     
     sample_inputs = [
         {
-            "intent": "Change field 'hp' to 'health'",
+            "intent": "Rename field 'hp' to 'health'",
             "error_context": "error[E0609]: no field `hp` on type `Entity`",
             "current_symbol": "Entity",
             "current_node_type": "struct_item",
-            "children_view": "[0] field_declaration:\npub health: f32,\n"
+            "node_text": "pub struct Entity {\n    pub hp: f32,\n    pub x: f32,\n    pub y: f32,\n}"
         },
         {
-            "intent": "Remove unused parameter",
-            "error_context": "warning: unused variable: `x`",
-            "current_symbol": "my_func",
+            "intent": "Fix typo in println! macro",
+            "error_context": "error: cannot find macro `prntln` in this scope",
+            "current_symbol": "main",
             "current_node_type": "function_item",
-            "children_view": "[0] parameter:\nx: i32\n[1] parameter:\ny: i32\n"
+            "node_text": "fn main() {\n    prntln!(\"Hello, world!\");\n}"
         },
         {
-            "intent": "Add missing semicolon",
-            "error_context": "error: expected `;`, found `}`",
-            "current_symbol": "fix_me",
+            "intent": "Add missing return type i32",
+            "error_context": "error[E0308]: mismatched types. expected `i32`, found `()` ",
+            "current_symbol": "add",
             "current_node_type": "function_item",
-            "children_view": "[0] expression_statement:\nlet a = 1\n"
+            "node_text": "fn add(a: i32, b: i32) {\n    a + b\n}"
         },
         {
-            "intent": "Fix typo in method call",
-            "error_context": "error[E0599]: no method named `prntln` found for struct `Stdout`",
-            "current_symbol": "run",
+            "intent": "Change parameter type from i32 to f32",
+            "error_context": "error[E0308]: mismatched types. expected `f32`, found `i32`",
+            "current_symbol": "sqrt",
             "current_node_type": "function_item",
-            "children_view": "[0] expression_statement:\nio::stdout().prntln(\"hi\")\n"
+            "node_text": "fn sqrt(val: i32) -> f32 {\n    val.sqrt()\n}"
         },
         {
-            "intent": "Correct return type",
-            "error_context": "error[E0308]: mismatched types. expected `i32`, found `f32`",
-            "current_symbol": "get_val",
-            "current_node_type": "function_item",
-            "children_view": "[0] type_identifier:\nf32\n"
+            "intent": "Publicize the struct",
+            "error_context": "error[E0603]: struct `Data` is private",
+            "current_symbol": "Data",
+            "current_node_type": "struct_item",
+            "node_text": "struct Data {\n    value: i32,\n}"
         }
     ]
 
     loss_fn = MapsLoss(lang_ptr)
 
-    for epoch in range(2): # Reduced to 2 epochs since we have strong constraints now
+    for epoch in range(2): 
         logger.info(f"=== Starting Epoch {epoch + 1} ===")
         
         for idx, input_data in enumerate(sample_inputs):
@@ -194,11 +176,11 @@ def run_optimization():
                 .replace("{{error_context}}", input_data["error_context"]) \
                 .replace("{{current_symbol}}", input_data["current_symbol"]) \
                 .replace("{{current_node_type}}", input_data["current_node_type"]) \
-                .replace("{{children_view}}", input_data["children_view"])
+                .replace("{{node_text}}", input_data["node_text"])
             
             user_input_var = tg.Variable(
                 rendered_user, 
-                role_description="user input containing the intent, error context, and AST children view"
+                role_description="user input containing the intent, error context, and target code"
             )
             
             logger.info(f"Processing input {idx + 1}...")
@@ -214,6 +196,9 @@ def run_optimization():
 
     print("\n--- Optimization Complete ---")
     print(f"Optimized System Prompt:\n{system_prompt.value}")
+    
+    # Optional: Write the optimized prompt back to config?
+    # No, better let the user decide.
 
 if __name__ == "__main__":
     run_optimization()

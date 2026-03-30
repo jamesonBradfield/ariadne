@@ -1,5 +1,5 @@
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import tree_sitter
 
@@ -60,6 +60,40 @@ class TreeSitterSensor:
             }
 
         return None
+
+
+class SubprocessSensor:
+    """
+    A simple wrapper around subprocess.run to provide structured output.
+    """
+
+    def __init__(self, command: List[str]):
+        self.command = command
+
+    def execute(self) -> Dict[str, Any]:
+        """
+        Executes the command and returns a dictionary with the results.
+        """
+        import subprocess
+
+        try:
+            # shell=False is safer for list-based commands
+            result = subprocess.run(
+                self.command, shell=False, capture_output=True, text=True, timeout=120
+            )
+            return {
+                "success": result.returncode == 0,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "returncode": result.returncode,
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "stdout": "",
+                "stderr": str(e),
+                "returncode": -1,
+            }
 
 
 class SyntaxGate:

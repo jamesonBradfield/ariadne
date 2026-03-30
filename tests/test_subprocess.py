@@ -1,4 +1,4 @@
-from components import SubprocessSensor
+from ariadne.components import SubprocessSensor
 
 
 def test_subprocess_sensor():

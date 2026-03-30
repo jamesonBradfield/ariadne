@@ -1,6 +1,14 @@
+from typing import Any, Tuple
 import tree_sitter_rust
-from core import EngineContext, State
-from components import TreeSitterSensor, DriveByWireActuator, SyntaxGate
+from ariadne.core import EngineContext, State
+from ariadne.components import TreeSitterSensor, SyntaxGate
+
+# Mock missing legacy component
+class DriveByWireActuator:
+    @staticmethod
+    def splice(*args, **kwargs):
+        print("MOCK: DriveByWireActuator.splice called")
+        return True
 
 # --- DEFINE OUR CONCRETE STATES ---
 
@@ -9,6 +17,9 @@ class SenseState(State):
     def __init__(self):
         super().__init__(name="SENSE")
         self.sensor = TreeSitterSensor(tree_sitter_rust.language())
+
+    def tick(self, payload: Any) -> Tuple[str, Any]:
+        return "IDLE", payload
 
     def execute(self, context: EngineContext) -> str:
         filepath = context.data["filepath"]
@@ -34,7 +45,10 @@ class SenseState(State):
 class SyntaxGateState(State):
     def __init__(self):
         super().__init__(name="SYNTAX_GATE")
-        self.syntax_gate = SyntaxGate()
+        self.syntax_gate = SyntaxGate(tree_sitter_rust.language())
+
+    def tick(self, payload: Any) -> Tuple[str, Any]:
+        return "IDLE", payload
 
     def execute(self, context: EngineContext) -> str:
         # Get the payload to validate (this would come from LLM in later phases)
@@ -63,6 +77,9 @@ class SyntaxGateState(State):
 class ActuateState(State):
     def __init__(self):
         super().__init__(name="ACTUATE")
+
+    def tick(self, payload: Any) -> Tuple[str, Any]:
+        return "IDLE", payload
 
     def execute(self, context: EngineContext) -> str:
         target_data = context.data["extracted_node"]

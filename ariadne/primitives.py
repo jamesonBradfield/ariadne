@@ -182,12 +182,33 @@ class QueryLLM(State):
 
             if post_process == "extract_search_replace":
                 cleaned_content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-                # Find blocks using regex
-                match = re.search(r"<<<<\n(.*?)\n====\n(.*?)\n>>>>", cleaned_content, re.DOTALL)
+                # Robust block extraction allowing optional SEARCH/REPLACE keywords
+                # Supports:
+                # <<<<
+                # code
+                # ====
+                # code
+                # >>>>
+                # AND
+                # <<<< SEARCH
+                # code
+                # ====
+                # >>>> REPLACE
+                # code
+                # >>>>
+                pattern = r"<<<<(?: SEARCH)?\n(.*?)\n====\n(?:>>>> REPLACE\n)?(.*?)\n>>>>"
+                match = re.search(pattern, cleaned_content, re.DOTALL)
                 if match:
                     search_text = match.group(1)
                     replace_text = match.group(2)
                     return "SUCCESS", {"search": search_text, "replace": replace_text}
+                
+                # Fallback for even more variations
+                fallback_pattern = r"<<<<.*??\n(.*?)\n====\n.*?\n(.*?)\n>>>>"
+                match = re.search(fallback_pattern, cleaned_content, re.DOTALL)
+                if match:
+                    return "SUCCESS", {"search": match.group(1), "replace": match.group(2)}
+
                 return "SEARCH_REPLACE_ERROR", content
 
             return "SUCCESS", content

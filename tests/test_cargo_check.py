@@ -1,4 +1,4 @@
-from components import CargoCheckHook
+from ariadne.profiles.rust_godot import CargoCheckHook
 
 
 def test_cargo_check_hook():
@@ -17,6 +17,7 @@ def test_cargo_check_hook():
     print(f"Success: {result['success']}")
     print(f"Number of messages: {len(result['messages'])}")
     print(f"Number of errors: {len(result['errors'])}")
+    print(f"Actual Errors: {result['errors']}")
 
     # We don't require success because we might not have a valid Rust project
     # but we do require that the component runs without throwing

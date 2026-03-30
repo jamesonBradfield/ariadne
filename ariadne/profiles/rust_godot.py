@@ -1,5 +1,5 @@
 import tree_sitter
-from components import SubprocessSensor
+from ariadne.components import SubprocessSensor
 import json
 from typing import Dict, Any
 

@@ -1,8 +1,9 @@
-from components import SyntaxGate
+import tree_sitter_rust
+from ariadne.components import SyntaxGate
 
 
 def test_syntax_gate():
-    gate = SyntaxGate()
+    gate = SyntaxGate(tree_sitter_rust.language())
 
     # Valid Rust code
     valid_code = """
