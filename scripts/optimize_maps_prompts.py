@@ -1,8 +1,13 @@
 import json
 import logging
 import os
+import re
 import textgrad as tg
 from typing import Any, Dict, List, Tuple
+
+# Set environment variables for LiteLLM
+os.environ["OPENAI_API_BASE"] = "http://100.92.54.124:8080/v1"
+os.environ["OPENAI_API_KEY"] = "sk-no-key"
 
 from ariadne.components import SyntaxGate
 from ariadne.profiles.rust_profile import RustProfile
@@ -11,7 +16,31 @@ from ariadne.profiles.rust_profile import RustProfile
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ariadne.optimizer")
 
-class MapsLoss(tg.Module):
+class EngineWrapper:
+    """
+    Wraps the TextGrad engine to handle thinking tokens and enforce formatting tags.
+    """
+    def __init__(self, engine, tags):
+        self.engine = engine
+        self.tags = tags
+
+    def __call__(self, prompt, **kwargs):
+        response = self.engine(prompt, **kwargs)
+        # 1. Strip thinking tokens (common in Qwen)
+        response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
+        response = re.sub(r"^</think>", "", response).strip()
+        
+        # 2. Enforce TextGrad tags if missing
+        if self.tags[0] not in response:
+            logger.warning(f"Engine output missing tags {self.tags[0]}. Wrapping response manually.")
+            response = f"{self.tags[0]}\n{response}\n{self.tags[1]}"
+            
+        return response
+
+    def generate(self, *args, **kwargs):
+        return self.__call__(*args, **kwargs)
+
+class MapsLoss(tg.loss.Module):
     """
     Custom Loss Function for MAPS state.
     Evaluates LLM output via SyntaxGate and index validation.
@@ -21,21 +50,17 @@ class MapsLoss(tg.Module):
         self.syntax_gate = SyntaxGate(language_ptr)
 
     def forward(self, response_variable: tg.Variable, context: Dict[str, Any]) -> tg.Variable:
-        """
-        Calculates 'textual gradient' (feedback) for the LLM response.
-        """
         response_text = response_variable.value
         children_view_str = context.get("children_view", "")
         
         # 1. Parse JSON
         try:
-            # We use a robust extraction similar to Ariadne's QueryLLM
-            import re
             start_index = response_text.find("{")
             end_index = response_text.rfind("}")
             if start_index == -1 or end_index == -1:
                 return tg.Variable(
-                    "CRITICAL FAILURE: Output is not valid JSON. You MUST output a single JSON object.",
+                    "CRITICAL FAILURE: The model did not output any JSON object. "
+                    "The system prompt MUST strictly command the model to output ONLY a raw JSON object and forbid markdown or conversational text.",
                     role_description="feedback"
                 )
             
@@ -43,7 +68,8 @@ class MapsLoss(tg.Module):
             data = json.loads(json_str)
         except Exception as e:
             return tg.Variable(
-                f"FAILURE: Failed to parse JSON: {str(e)}. Ensure your output is perfectly formatted JSON.",
+                f"JSON PARSE FAILURE: The model produced invalid JSON (Error: {str(e)}). "
+                f"The system prompt needs to be extremely explicit about formatting. It must demand a perfectly formatted JSON object with double quotes for keys and no trailing commas.",
                 role_description="feedback"
             )
 
@@ -58,9 +84,10 @@ class MapsLoss(tg.Module):
             res = self.syntax_gate.validate(code)
             if not res["valid"]:
                 feedback.append(
-                    f"SYNTAX ERROR: The code snippet you provided is invalid.\n"
+                    f"SYNTAX ERROR: The code snippet provided by the model is invalid.\n"
                     f"Error: {res['error_message']}\n"
-                    f"Code: {code}"
+                    f"Code: {code}\n"
+                    f"The system prompt MUST remind the model to generate syntactically correct code for the language being edited."
                 )
 
         # 3. Check Index Bounds
@@ -71,18 +98,18 @@ class MapsLoss(tg.Module):
         if target_idx is not None:
             if target_idx < 0 or target_idx > max_idx:
                 feedback.append(
-                    f"INDEX ERROR: Target index {target_idx} is out of bounds for the current view (max index: {max_idx})."
+                    f"INDEX ERROR: Target index {target_idx} is out of bounds (max index: {max_idx}). "
+                    f"The system prompt should instruct the model to only use the target IDs provided in the 'Children View'."
                 )
         elif action != "done" and action != "up":
-            feedback.append("VALIDATION ERROR: 'target' index is missing for action that requires it.")
+            feedback.append("VALIDATION ERROR: 'target' index is missing. The prompt must enforce that 'target' is required for editing actions.")
 
         if not feedback:
-            return tg.Variable("SUCCESS: The output is valid and follows all rules.", role_description="feedback")
+            return tg.Variable("SUCCESS: The output is valid, syntactically correct, and follows all rules.", role_description="feedback")
         
         return tg.Variable("\n".join(feedback), role_description="feedback")
 
 def run_optimization():
-    # 1. Load initial prompts from config
     with open("ariadne_config.json", "r") as f:
         config = json.load(f)
     
@@ -90,38 +117,29 @@ def run_optimization():
     initial_system = maps_config["system_prompt"]
     initial_user = maps_config["user_prompt_template"]
 
-    # 2. Setup the TextGrad engine pointing to the local llama.cpp server
-    engine = tg.get_engine(
-        engine_name="openai/qwen",
-        api_base="http://localhost:8080/v1",
-        api_key="sk-no-key"
-    )
+    from textgrad.engine import LiteLLMEngine
+    raw_engine = LiteLLMEngine(model_string="openai/qwen")
     
-    # TextGrad typically uses either set_backward_engine or set_default_engine
-    try:
-        tg.set_default_engine(engine)
-    except AttributeError:
-        pass
-    try:
-        tg.set_backward_engine(engine)
-    except AttributeError:
-        pass
+    tags = ["<IMPROVED_VARIABLE>", "</IMPROVED_VARIABLE>"]
+    engine = EngineWrapper(raw_engine, tags)
+    tg.set_backward_engine(engine)
 
-    # 3. Define the system prompt Variable to optimize
     system_prompt = tg.Variable(
         initial_system, 
         requires_grad=True, 
         role_description="system prompt for the Micro AST Procedural Surgeon (MAPS) state"
     )
 
-    # 4. Setup Optimizer
-    # We focus on optimizing the system prompt here as the user prompt is mostly contextual template variables.
-    optimizer = tg.TGD(parameters=[system_prompt])
+    # ADDING CONSTRAINTS to prevent the model from forgetting the JSON format
+    constraints = [
+        "The prompt MUST explicitly state that the output should be ONLY a SINGLE JSON object, with no markdown formatting.",
+        "The prompt MUST explicitly list the valid actions: 'zoom', 'up', 'replace', 'insert_before', 'insert_after', 'delete', 'done'.",
+        "The prompt MUST provide the exact JSON schema to follow: {\"reasoning\": \"...\", \"action\": \"...\", \"target\": 0, \"code\": \"...\"}."
+    ]
 
-    # 5. Initialize the BlackboxLLM wrapper for the forward pass
+    optimizer = tg.TGD(parameters=[system_prompt], new_variable_tags=tags, constraints=constraints)
     model = tg.BlackboxLLM(system_prompt=system_prompt, engine=engine)
 
-    # 6. Dataset (5 sample inputs)
     profile = RustProfile()
     lang_ptr = profile.get_language_ptr()
     
@@ -163,17 +181,14 @@ def run_optimization():
         }
     ]
 
-    # 7. Loss Function
     loss_fn = MapsLoss(lang_ptr)
 
-    # 8. Optimization Loop
-    for epoch in range(3): # Run 3 epochs over the dataset
+    for epoch in range(2): # Reduced to 2 epochs since we have strong constraints now
         logger.info(f"=== Starting Epoch {epoch + 1} ===")
         
         for idx, input_data in enumerate(sample_inputs):
             optimizer.zero_grad()
             
-            # Format the user prompt manually
             rendered_user = initial_user \
                 .replace("{{intent}}", input_data["intent"]) \
                 .replace("{{error_context}}", input_data["error_context"]) \
@@ -188,17 +203,11 @@ def run_optimization():
             
             logger.info(f"Processing input {idx + 1}...")
             
-            # Forward pass: Generate the LLM response
             response = model(user_input_var)
-            
-            # Calculate the loss / feedback
             loss = loss_fn(response, input_data)
             logger.info(f"Input {idx + 1} Loss/Feedback: {loss.value}")
             
-            # Backward pass: Generate textual gradients based on the feedback
             loss.backward()
-            
-            # Optimization step: Ask the LLM to update the system prompt based on criticisms
             optimizer.step()
             
             logger.info(f"Finished processing input {idx + 1}")
