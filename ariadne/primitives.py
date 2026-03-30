@@ -182,32 +182,43 @@ class QueryLLM(State):
 
             if post_process == "extract_search_replace":
                 cleaned_content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-                # Robust block extraction allowing optional SEARCH/REPLACE keywords
-                # Supports:
-                # <<<<
-                # code
-                # ====
-                # code
-                # >>>>
-                # AND
-                # <<<< SEARCH
-                # code
-                # ====
-                # >>>> REPLACE
-                # code
-                # >>>>
-                pattern = r"<<<<(?: SEARCH)?\n(.*?)\n====\n(?:>>>> REPLACE\n)?(.*?)\n>>>>"
-                match = re.search(pattern, cleaned_content, re.DOTALL)
-                if match:
-                    search_text = match.group(1)
-                    replace_text = match.group(2)
-                    return "SUCCESS", {"search": search_text, "replace": replace_text}
                 
-                # Fallback for even more variations
-                fallback_pattern = r"<<<<.*??\n(.*?)\n====\n.*?\n(.*?)\n>>>>"
-                match = re.search(fallback_pattern, cleaned_content, re.DOTALL)
-                if match:
-                    return "SUCCESS", {"search": match.group(1), "replace": match.group(2)}
+                search_lines = []
+                replace_lines = []
+                state = "SCANNING"
+                
+                for line in cleaned_content.splitlines():
+                    stripped = line.strip()
+                    
+                    if stripped.startswith("<<<<"):
+                        state = "IN_SEARCH"
+                        continue
+                    elif stripped.startswith("===="):
+                        state = "IN_REPLACE"
+                        continue
+                    elif stripped.startswith(">>>>"):
+                        break
+                        
+                    if state == "IN_SEARCH":
+                        search_lines.append(line)
+                    elif state == "IN_REPLACE":
+                        replace_lines.append(line)
+                
+                # Clean up potential markdown code fences from the beginning/end of blocks
+                if search_lines and search_lines[0].strip().startswith("```"):
+                    search_lines.pop(0)
+                if search_lines and search_lines[-1].strip() == "```":
+                    search_lines.pop()
+                    
+                if replace_lines and replace_lines[0].strip().startswith("```"):
+                    replace_lines.pop(0)
+                if replace_lines and replace_lines[-1].strip() == "```":
+                    replace_lines.pop()
+                
+                if search_lines or replace_lines:
+                    search_text = "\n".join(search_lines)
+                    replace_text = "\n".join(replace_lines)
+                    return "SUCCESS", {"search": search_text, "replace": replace_text}
 
                 return "SEARCH_REPLACE_ERROR", content
 
