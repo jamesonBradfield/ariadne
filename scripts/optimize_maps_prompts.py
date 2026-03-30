@@ -1,23 +1,8 @@
 import json
 import logging
 import os
+import textgrad as tg
 from typing import Any, Dict, List, Tuple
-
-# Mocking textgrad if not installed for the sake of drafting the script
-try:
-    import textgrad as tg
-except ImportError:
-    # This is just to allow the script to be 'created' and 'read' without errors in the CLI
-    # In a real run, the user would pip install it.
-    class tg:
-        class Variable:
-            def __init__(self, value, requires_grad=False, role_description=""):
-                self.value = value
-        class Module: pass
-        class TGD:
-            def __init__(self, parameters): pass
-            def zero_grad(self): pass
-            def step(self): pass
 
 from ariadne.components import SyntaxGate
 from ariadne.profiles.rust_profile import RustProfile
@@ -79,8 +64,6 @@ class MapsLoss(tg.Module):
                 )
 
         # 3. Check Index Bounds
-        # children_view is formatted as "[0] type:\ncode\n[1] type:\ncode"
-        # We can count the number of "[idx]" to find the max index.
         import re
         indices = re.findall(r"\[(\d+)\]", children_view_str)
         max_idx = max(int(i) for i in indices) if indices else -1
@@ -107,22 +90,38 @@ def run_optimization():
     initial_system = maps_config["system_prompt"]
     initial_user = maps_config["user_prompt_template"]
 
-    # 2. Define Variables to optimize
+    # 2. Setup the TextGrad engine pointing to the local llama.cpp server
+    engine = tg.get_engine(
+        engine_name="openai/qwen",
+        api_base="http://localhost:8080/v1",
+        api_key="sk-no-key"
+    )
+    
+    # TextGrad typically uses either set_backward_engine or set_default_engine
+    try:
+        tg.set_default_engine(engine)
+    except AttributeError:
+        pass
+    try:
+        tg.set_backward_engine(engine)
+    except AttributeError:
+        pass
+
+    # 3. Define the system prompt Variable to optimize
     system_prompt = tg.Variable(
         initial_system, 
         requires_grad=True, 
-        role_description="system prompt for the MAPS state"
-    )
-    user_prompt_template = tg.Variable(
-        initial_user, 
-        requires_grad=True, 
-        role_description="user prompt template for the MAPS state"
+        role_description="system prompt for the Micro AST Procedural Surgeon (MAPS) state"
     )
 
-    # 3. Setup Optimizer
-    optimizer = tg.TGD(parameters=[system_prompt, user_prompt_template])
+    # 4. Setup Optimizer
+    # We focus on optimizing the system prompt here as the user prompt is mostly contextual template variables.
+    optimizer = tg.TGD(parameters=[system_prompt])
 
-    # 4. Dataset (5 sample inputs)
+    # 5. Initialize the BlackboxLLM wrapper for the forward pass
+    model = tg.BlackboxLLM(system_prompt=system_prompt, engine=engine)
+
+    # 6. Dataset (5 sample inputs)
     profile = RustProfile()
     lang_ptr = profile.get_language_ptr()
     
@@ -164,35 +163,48 @@ def run_optimization():
         }
     ]
 
-    # 5. Loss Function
+    # 7. Loss Function
     loss_fn = MapsLoss(lang_ptr)
 
-    # 6. Optimization Loop
-    # In a real run, we would use an actual LLM engine here.
-    # engine = tg.engines.LiteLLM(model="gpt-4o")
-    
+    # 8. Optimization Loop
     for epoch in range(3): # Run 3 epochs over the dataset
-        logger.info(f"Starting Epoch {epoch + 1}")
+        logger.info(f"=== Starting Epoch {epoch + 1} ===")
         
         for idx, input_data in enumerate(sample_inputs):
             optimizer.zero_grad()
             
-            # Forward: Render prompt and call LLM
-            # (In reality, we would use a tg.Module to wrap the LLM call)
-            # For this draft, we show the conceptual flow
+            # Format the user prompt manually
+            rendered_user = initial_user \
+                .replace("{{intent}}", input_data["intent"]) \
+                .replace("{{error_context}}", input_data["error_context"]) \
+                .replace("{{current_symbol}}", input_data["current_symbol"]) \
+                .replace("{{current_node_type}}", input_data["current_node_type"]) \
+                .replace("{{children_view}}", input_data["children_view"])
             
-            # rendered_user = initial_user.replace("{{intent}}", input_data["intent"])...
-            # response = engine(system_prompt, rendered_user)
+            user_input_var = tg.Variable(
+                rendered_user, 
+                role_description="user input containing the intent, error context, and AST children view"
+            )
             
-            # loss = loss_fn(response, input_data)
-            # loss.backward()
-            # optimizer.step()
+            logger.info(f"Processing input {idx + 1}...")
             
-            logger.info(f"Processed input {idx + 1}")
+            # Forward pass: Generate the LLM response
+            response = model(user_input_var)
+            
+            # Calculate the loss / feedback
+            loss = loss_fn(response, input_data)
+            logger.info(f"Input {idx + 1} Loss/Feedback: {loss.value}")
+            
+            # Backward pass: Generate textual gradients based on the feedback
+            loss.backward()
+            
+            # Optimization step: Ask the LLM to update the system prompt based on criticisms
+            optimizer.step()
+            
+            logger.info(f"Finished processing input {idx + 1}")
 
-    print("Optimization Complete.")
-    print(f"Optimized System Prompt: {system_prompt.value}")
-    print(f"Optimized User Prompt Template: {user_prompt_template.value}")
+    print("\n--- Optimization Complete ---")
+    print(f"Optimized System Prompt:\n{system_prompt.value}")
 
 if __name__ == "__main__":
     run_optimization()
