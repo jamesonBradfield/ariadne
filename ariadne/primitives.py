@@ -216,8 +216,11 @@ class QueryLLM(State):
                     replace_lines.pop()
                 
                 if search_lines or replace_lines:
-                    search_text = "\n".join(search_lines)
-                    replace_text = "\n".join(replace_lines)
+                    # Detect line endings from content (simple heuristic)
+                    line_ending = "\r\n" if "\r\n" in cleaned_content else "\n"
+                    
+                    search_text = line_ending.join(search_lines)
+                    replace_text = line_ending.join(replace_lines)
                     return "SUCCESS", {"search": search_text, "replace": replace_text}
 
                 return "SEARCH_REPLACE_ERROR", content
@@ -345,8 +348,14 @@ class ASTSplice(State):
                 after = new_source_code[end_byte:]
                 new_source_code = before + new_code_bytes + after
 
+            logger.info(f"Writing {len(new_source_code)} bytes to {filepath}")
             with open(filepath, "wb") as f:
                 f.write(new_source_code)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
 
             return "SUCCESS", filepath
         except Exception as e:
@@ -381,26 +390,59 @@ class BlockSplice(State):
             new_source_code = full_source
 
             for edit in edits:
-                search_bytes = edit["search_text"].encode("utf-8")
-                replace_bytes = edit["replace_text"].encode("utf-8")
+                search_text = edit["search_text"]
+                replace_text = edit["replace_text"]
                 start_byte = edit["start_byte"]
                 end_byte = edit["end_byte"]
 
                 node_bytes = new_source_code[start_byte:end_byte]
+                logger.info(f"BlockSplice edit: {start_byte}-{end_byte} (node size: {len(node_bytes)} bytes)")
+                node_text = node_bytes.decode("utf-8")
                 
-                # Perform replace within the node boundaries
-                if search_bytes not in node_bytes:
+                # Normalize for replacement logic
+                # We want to replace the text regardless of whether it's \n or \r\n
+                search_norm = search_text.replace("\r\n", "\n")
+                node_norm = node_text.replace("\r\n", "\n")
+                
+                logger.info(f"BlockSplice DEBUG: search_norm length: {len(search_norm)}")
+                logger.info(f"BlockSplice DEBUG: node_norm length: {len(node_norm)}")
+                
+                if search_norm not in node_norm:
                     logger.error(f"BlockSplice rejected: search_text not found in target node.")
+                    logger.error(f"BlockSplice DEBUG: search_norm: '{search_norm}'")
+                    logger.error(f"BlockSplice DEBUG: node_norm: '{node_norm}'")
                     return "REJECTED", "search_text not found in node"
 
-                new_node_bytes = node_bytes.replace(search_bytes, replace_bytes, 1)
+                # Perform the replacement on normalized text
+                replace_norm = replace_text.replace("\r\n", "\n")
+                logger.info(f"BlockSplice DEBUG: search_norm: '{search_norm}'")
+                logger.info(f"BlockSplice DEBUG: node_norm: '{node_norm}'")
+                logger.info(f"BlockSplice DEBUG: replace_norm: '{replace_norm}'")
+                
+                new_node_text_norm = node_norm.replace(search_norm, replace_norm, 1)
+                logger.info(f"BlockSplice DEBUG: new_node_text_norm length: {len(new_node_text_norm)}")
+                
+                # If the original file used CRLF, try to restore it for the new node text
+                if b"\r\n" in node_bytes:
+                    new_node_text = new_node_text_norm.replace("\n", "\r\n")
+                else:
+                    new_node_text = new_node_text_norm
+
+                logger.info(f"BlockSplice: new_node_text length: {len(new_node_text)}")
+                new_node_bytes = new_node_text.encode("utf-8")
 
                 before = new_source_code[:start_byte]
                 after = new_source_code[end_byte:]
                 new_source_code = before + new_node_bytes + after
 
+            logger.info(f"Writing {len(new_source_code)} bytes to {filepath}")
             with open(filepath, "wb") as f:
                 f.write(new_source_code)
+                f.flush()
+                try:
+                    os.fsync(f.fileno())
+                except Exception:
+                    pass
 
             return "SUCCESS", filepath
         except Exception as e:

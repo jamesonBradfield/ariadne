@@ -397,7 +397,12 @@ class MAPS(State):
         search_text = response.get("search", "")
         replace_text = response.get("replace", "")
 
-        if search_text not in node_text:
+        # Resilient match: Normalize line endings for the existence check
+        # This prevents mismatches if the source has CRLF but the LLM/parser joined with LF.
+        search_norm = search_text.replace("\r\n", "\n").strip()
+        node_norm = node_text.replace("\r\n", "\n")
+
+        if search_norm not in node_norm:
             job.llm_feedback = f"The SEARCH block text was not found exactly within the target symbol '{current_symbol}'. Please ensure exact whitespace and spelling."
             return "MAPS", job
 
