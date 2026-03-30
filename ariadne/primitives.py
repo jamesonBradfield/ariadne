@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -190,11 +191,13 @@ class QueryLLM(State):
                 for line in cleaned_content.splitlines():
                     stripped = line.strip()
                     
-                    if stripped.startswith("<<<<"):
+                    if stripped.startswith("<<<< SEARCH"):
                         state = "IN_SEARCH"
                         continue
                     elif stripped.startswith("===="):
                         state = "IN_REPLACE"
+                        continue
+                    elif stripped.startswith(">>>> REPLACE"):
                         continue
                     elif stripped.startswith(">>>>"):
                         break

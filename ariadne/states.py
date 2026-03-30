@@ -390,12 +390,25 @@ class MAPS(State):
         if status != "SUCCESS":
             logger.error(f"[{self.name}] LLM generation failed: {response}")
             job.llm_feedback = "Failed to extract SEARCH/REPLACE block. Make sure to use <<<< and ==== and >>>>."
+            job.retry_count += 1
+            if job.retry_count > 3:
+                logger.error("Circuit breaker triggered in MAPS: Too many retries.")
+                return "ABORT", job
             return "MAPS", job
 
         job.llm_feedback = ""
 
         search_text = response.get("search", "")
         replace_text = response.get("replace", "")
+
+        # Prevent empty REPLACE block wiping out code if it perfectly matches the node
+        if search_text and not replace_text.strip() and search_text.strip() == node_text.strip():
+            job.llm_feedback = "The REPLACE block is empty, which would delete the entire symbol. Please provide the replacement code."
+            job.retry_count += 1
+            if job.retry_count > 3:
+                logger.error("Circuit breaker triggered in MAPS: Empty REPLACE block.")
+                return "ABORT", job
+            return "MAPS", job
 
         # Resilient match: Normalize line endings for the existence check
         # This prevents mismatches if the source has CRLF but the LLM/parser joined with LF.
@@ -404,6 +417,10 @@ class MAPS(State):
 
         if search_norm not in node_norm:
             job.llm_feedback = f"The SEARCH block text was not found exactly within the target symbol '{current_symbol}'. Please ensure exact whitespace and spelling."
+            job.retry_count += 1
+            if job.retry_count > 3:
+                logger.error("Circuit breaker triggered in MAPS: SEARCH block not found.")
+                return "ABORT", job
             return "MAPS", job
 
         edit = {
@@ -446,6 +463,10 @@ class SYNTAX_GATE(State):
                 symbol_name = edit.get('symbol', 'unknown')
                 logger.error(f"[{self.name}] Syntax validation failed for {symbol_name}: {error_msg}")
                 job.llm_feedback = f"Syntax error in {symbol_name}: {error_msg}"
+                job.retry_count += 1
+                if job.retry_count > 3:
+                    logger.error("Circuit breaker triggered in SYNTAX_GATE: Too many retries.")
+                    return "ABORT", job
                 return "ROUTER", job
 
         job.llm_feedback = ""
