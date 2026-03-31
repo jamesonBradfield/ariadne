@@ -511,3 +511,61 @@ class ACTUATE(State):
         logger.error(f"[{self.name}] Splice failed: {result}")
         job.llm_feedback = f"Splice failed: {result}"
         return "ROUTER", job
+
+class POST_MORTEM(State):
+    """
+    Final state that summarizes the session, logs metrics, and saves a report.
+    """
+    def __init__(self, config_manager: Any):
+        super().__init__("POST_MORTEM")
+        self.config_manager = config_manager
+        self.config = config_manager.get_model_info("POST_MORTEM")
+        # Optional: Use LLM to summarize the fix
+        self.query_llm = QueryLLM(model=self.config.get("model"), api_base=self.config.get("api_base"))
+
+    def tick(self, job: Any) -> Tuple[str, Any]:
+        import json
+        import os
+        from datetime import datetime
+
+        # Extract data from JobPayload or dict
+        if hasattr(job, "intent"):
+             # JobPayload
+             report = {
+                 "timestamp": datetime.now().isoformat(),
+                 "intent": job.intent,
+                 "final_state": "SUCCESS" if job.test_stdout == "" else "FAILED", # Rough heuristic
+                 "retry_count": job.retry_count,
+                 "target_files": job.target_files,
+                 "plan_history": job.plan_history,
+                 "test_output_summary": job.test_stdout[:500] if job.test_stdout else "All tests passed."
+             }
+        else:
+             # Dict-based (e.g. if we failed early in TRIAGE)
+             report = {
+                 "timestamp": datetime.now().isoformat(),
+                 "intent": job.get("intent", "Unknown"),
+                 "final_state": "ABORTED_EARLY",
+                 "retry_count": 0,
+                 "target_files": job.get("target_files", []),
+                 "plan_history": [],
+                 "test_output_summary": "Session ended before job execution."
+             }
+
+        # Log it
+        logger.info(f"[{self.name}] --- SESSION SUMMARY ---")
+        logger.info(f"[{self.name}] Intent: {report['intent']}")
+        logger.info(f"[{self.name}] Status: {report['final_state']}")
+        logger.info(f"[{self.name}] Retries: {report['retry_count']}")
+        
+        # Save to logs directory
+        if not os.path.exists("logs"):
+            os.makedirs("logs")
+            
+        filename = f"logs/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.jsonl"
+        with open(filename, "w") as f:
+            f.write(json.dumps(report) + "\n")
+            
+        logger.info(f"[{self.name}] Report saved to {filename}")
+        
+        return "FINISH", job

@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from ariadne.core import EngineContext, State
 from ariadne.payloads import JobPayload
 from ariadne.primitives import QueryLLM, ASTSplice
-from ariadne.states import TRIAGE, DISPATCH, EVALUATE, THINKING, ROUTER, SEARCH, SENSE, MAPS, SYNTAX_GATE, ACTUATE
+from ariadne.states import TRIAGE, DISPATCH, EVALUATE, THINKING, ROUTER, SEARCH, SENSE, MAPS, SYNTAX_GATE, ACTUATE, POST_MORTEM
 from ariadne.components import TreeSitterSensor, SyntaxGate
 
 # Setup logging
@@ -176,6 +176,7 @@ def main():
         "MAPS": MAPS(config_manager, profile),
         "SYNTAX_GATE": SYNTAX_GATE(profile),
         "ACTUATE": ACTUATE(),
+        "POST_MORTEM": POST_MORTEM(config_manager),
     }
 
     # 4. Initialize Engine Context
@@ -188,8 +189,14 @@ def main():
         payload = JobPayload(intent=args.intent, target_files=target_files)
 
     # 5. Run the Loop
-    while context.current_state != "SUCCESS" and context.current_state != "ABORT":
+    while context.current_state != "FINISH":
         logger.info(f"--- TICKING: {context.current_state} ---")
+        
+        # Terminal states transition to POST_MORTEM
+        if context.current_state in ["SUCCESS", "ABORT"]:
+             context.transition("POST_MORTEM")
+             logger.info(f"Terminal state {context.current_state} reached. Transitioning to POST_MORTEM.")
+
         active_state = states_registry.get(context.current_state)
         
         if not active_state:
@@ -205,6 +212,9 @@ def main():
         logger.info(f"[BENCHMARK] {context.current_state} took {elapsed:.2f}s")
         
         context.transition(current_state_name)
+
+        if current_state_name == "FINISH":
+             break
 
     logger.info(f"Engine dropped to terminal state: {context.current_state}")
 
