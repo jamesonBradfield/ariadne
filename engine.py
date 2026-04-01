@@ -10,7 +10,7 @@ from ariadne.payloads import JobPayload
 from ariadne.states import (
     TRIAGE, DISPATCH, EVALUATE, THINKING, ROUTER, 
     SEARCH, SENSE, MAPS, SYNTAX_GATE, ACTUATE, 
-    POST_MORTEM, INTERVENE
+    POST_MORTEM, INTERVENE, DOCS
 )
 from ariadne.tui import AriadneApp, StateTransitionMessage
 
@@ -283,6 +283,7 @@ def main():
             "ACTUATE": ACTUATE(),
             "POST_MORTEM": POST_MORTEM(config_manager),
             "INTERVENE": INTERVENE(config_manager),
+            "DOCS": DOCS(config_manager),
         }
 
     states_registry = create_states(target_files)

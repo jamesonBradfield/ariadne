@@ -17,6 +17,7 @@ class JobPayload:
     plan: Dict[str, Any] = field(default_factory=dict)
     plan_history: List[str] = field(default_factory=list)
     extracted_nodes: List[Dict[str, Any]] = field(default_factory=list)
+    docs: Optional[str] = None
     
     # MAPS / ACTUATE outputs
     maps_state: Dict[str, Any] = field(default_factory=dict)

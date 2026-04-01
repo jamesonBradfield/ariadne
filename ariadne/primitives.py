@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import subprocess
+import asyncio
 from typing import Any, Dict, List, Optional, Tuple
 
 import tree_sitter
@@ -9,6 +10,60 @@ import tree_sitter
 from .core import State
 
 logger = logging.getLogger("ariadne.primitives")
+
+
+class QueryMCP(State):
+    """
+    Agnostic MCP query primitive.
+    Connects to an MCP server via stdio and calls a tool.
+    Input Payload: Dict with 'command', 'args', 'tool_name', and 'tool_args'.
+    Returns: Tuple[str, Any] (status, result)
+    """
+
+    def __init__(self):
+        super().__init__("QUERY_MCP")
+
+    async def _query(self, command: str, args: List[str], tool_name: str, tool_args: Dict[str, Any]) -> Any:
+        from mcp import ClientSession, StdioServerParameters
+        from mcp.client.stdio import stdio_client
+
+        server_params = StdioServerParameters(
+            command=command,
+            args=args,
+            env=None
+        )
+
+        async with stdio_client(server_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                
+                # Call the tool
+                result = await session.call_tool(tool_name, tool_args)
+                return result
+
+    def tick(self, payload: Dict[str, Any]) -> Tuple[str, Any]:
+        command = payload.get("command")
+        args = payload.get("args", [])
+        tool_name = payload.get("tool_name")
+        tool_args = payload.get("tool_args", {})
+
+        if not command or not tool_name:
+            logger.warning(f"QueryMCP skipped: Missing command ({command}) or tool_name ({tool_name})")
+            return "ERROR", "Missing parameters"
+
+        try:
+            # Run the async query in a synchronous way for the HFSM
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(self._query(command, args, tool_name, tool_args))
+            loop.close()
+            
+            return "SUCCESS", result
+        except Exception as e:
+            logger.error(f"QueryMCP Error: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return "ERROR", str(e)
 
 
 class ExtractAST(State):

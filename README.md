@@ -51,3 +51,24 @@ python engine.py --targets src/main.rs --intent "Add error handling to the proce
 
 ## 📜 License
 GPL v3
+
+---
+
+## 📝 Recent Development Notes (Session Summary)
+
+### **Headless & MCP-Augmented Infrastructure**
+This session evolved Ariadne into a **headless-capable, MCP-augmented framework** suited for small-context models like Qwen 2.5 (9b).
+
+1.  **Headless RPC Intervention**:
+    *   `INTERVENE` state now supports external editors via **Neovim RPC** (`nvim --server 127.0.0.1:6666 --remote`).
+    *   Execution pauses in the terminal to allow manual file edits in a remote editor instance.
+2.  **Agnostic Documentation (DOCS State)**:
+    *   Added a `DOCS` state and `QueryMCP` primitive using the official `mcp` SDK.
+    *   Supports retrieving context via local MCP servers or falling back to raw `cargo doc` HTML.
+3.  **MAPS Navigation Fixes**:
+    *   **Loop Prevention**: Added feedback loops to prevent the LLM from attempting to navigate beyond the current AST symbol root.
+    *   **ID Mapping Fix**: Resolved a critical type mismatch between string IDs from LLMs and integer keys in the Tree-sitter `id_map`.
+4.  **Rust Project Support**:
+    *   Upgraded `scripts/run_rust_tests.py` to use `cargo test` within the target project directory, correctly resolving Godot-Rust crate dependencies.
+
+**Next Steps**: Pipeline raw HTML through a Markdown converter (like `mcp-stripfeed`) to optimize token usage in the `DOCS` state.

@@ -102,15 +102,19 @@ class TreeSitterSensor:
             node = node.parent
         
         view_lines = []
-        id_map = {}
+        id_map = {"self": (node.start_byte, node.end_byte)}
+        if node.parent:
+            id_map["parent"] = (node.parent.start_byte, node.parent.end_byte)
         
         # If the node has no children, but we're looking at it, we might want to see its text
         if len(node.named_children) == 0:
-             view_lines.append(f"Current Node: {node.type} [{node.start_byte}-{node.end_byte}]")
+             view_lines.append(f"Current Node [ID: self]: {node.type} [{node.start_byte}-{node.end_byte}]")
              view_lines.append(f" (No named children. Snippet: \"{node.text.decode('utf-8', errors='replace')}\")")
-             return "\n".join(view_lines), {}
+             return "\n".join(view_lines), id_map
         
-        view_lines.append(f"Current Node: {node.type} [{node.start_byte}-{node.end_byte}]")
+        view_lines.append(f"Current Node [ID: self]: {node.type} [{node.start_byte}-{node.end_byte}]")
+        if node.parent:
+            view_lines.append(f" [ID: parent] {node.parent.type} (Back)")
         
         child_idx = 0
         # Use named_children for cleaner navigation
@@ -120,8 +124,8 @@ class TreeSitterSensor:
             if len(child_code) > 80:
                 child_code = child_code[:77] + "..."
             
-            view_lines.append(f"[{child_idx}] {child.type}: \"{child_code}\"")
-            id_map[child_idx] = (child.start_byte, child.end_byte)
+            view_lines.append(f" [ID: {child_idx}] {child.type}: \"{child_code}\"")
+            id_map[str(child_idx)] = (child.start_byte, child.end_byte)
             child_idx += 1
             
         if not id_map:

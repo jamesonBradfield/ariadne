@@ -10,8 +10,9 @@
   },
   "editor": {
     "command_template": "nvim +{line} {file}",
+    "rpc_command_template": "nvim --server 127.0.0.1:6666 --remote +{line} {file}",
     "blocking": true,
-    "headless": false
+    "headless": true
   },
 
   "states": {
@@ -26,21 +27,28 @@
       "post_process": "strip_markdown"
     },
     "THINKING": {
-      "system_prompt": "You are an Architect. Create a logical repair plan. Rules:\n1. Use ONLY names from 'Available Symbols'.\n2. Compare 'Test Code' and 'Skeletons' to find naming mismatches (e.g. Test uses 'Hero' but Source has 'Entity').\n3. Output RAW JSON: {\"reasoning\": \"...\", \"steps\": [{\"symbol\": \"...\"}]}",
+      "system_prompt": "You are an Architect. Create a logical repair plan. Rules:\n1. Use ONLY names from 'Available Symbols'.\n2. If you are ADDING a new method or field, target the parent Struct/Class name as the symbol.\n3. Compare 'Test Code' and 'Skeletons' to find naming mismatches.\n4. Output RAW JSON: {\"reasoning\": \"...\", \"steps\": [{\"symbol\": \"...\"}]}",
       "user_prompt_template": "Intent: {{intent}}\nTest Code: {{test_code}}\nErrors: {{test_stdout}}\nAvailable: {{available_symbols}}\nSkeletons: {{skeletons}}",
       "params": { "max_tokens": 512 },
       "post_process": "extract_json"
     },
     "MAPS": {
-      "system_prompt": "You are a surgical navigator in an AST. Your task is to navigate the tree and perform micro-edits.\n\nRules:\n1. You must output a single JSON object.\n2. Actions: \n   - zoom: Move deeper into the children of target_id.\n   - up: Move to the parent of the current node.\n   - replace: Replace the code of target_id with the provided 'code'.\n   - delete: Remove the target_id node.\n   - insert_before: Insert 'code' before target_id.\n   - insert_after: Insert 'code' after target_id.\n   - done: Finalize all edits for this symbol.\n3. Output Schema: {\"reasoning\": \"...\", \"action\": \"<zoom|up|replace|delete|insert_before|insert_after|done>\", \"target_id\": <int>, \"code\": \"<string, if needed>\"}\n4. ONLY output RAW JSON.",
+      "system_prompt": "You are a surgical navigator in an AST. Your task is to navigate the tree and perform micro-edits.\n\nRules:\n1. You must output a single JSON object.\n2. Actions: \n   - zoom: Move deeper into the children of target_id.\n   - up: Move to the parent of the current node.\n   - replace: Replace the code of target_id with the provided 'code'.\n   - delete: Remove the target_id node.\n   - insert_before: Insert 'code' before target_id.\n   - insert_after: Insert 'code' after target_id.\n   - done: Finalize all edits for this symbol.\n3. If you are adding a NEW method, find the end of the implementation block or a suitable sibling method and use 'insert_after'.\n4. Output Schema: {\"reasoning\": \"...\", \"action\": \"<zoom|up|replace|delete|insert_before|insert_after|done>\", \"target_id\": <string|int>, \"code\": \"<string, if needed>\"}\n5. ONLY output RAW JSON.",
       "user_prompt_template": "Objective: {{intent}}\n{{error_context}}\n\nAST View:\n{{ast_view}}",
       "params": { "max_tokens": 1024 },
       "post_process": "extract_json"
     },
 
+    "DOCS": {
+      "system_prompt": "You are a Documentation Analyst. Your task is to extract the most relevant information from the provided raw documentation to help solve the user's intent. Output a concise, technical summary focusing on API signatures, types, and usage examples. Keep it extremely compact.",
+      "user_prompt_template": "Intent: {{intent}}\n\nRaw Documentation:\n{{raw_docs}}",
+      "doc_index": "TexelSplatting/target/doc/texel_splatting/index.html",
+      "params": { "max_tokens": 1024 }
+    },
+
 "ROUTER": {
-      "system_prompt": "You are the Engine Orchestrator. Decide the next state based on the current job context, recent errors, and the active plan.\n\nSTATE DEFINITIONS:\n- SEARCH: Use this to physically EDIT SOURCE CODE based on the active plan.\n- DISPATCH: Use this ONLY to generate initial unit tests. NEVER use this to fix failing code.\n- THINKING: Use this to generate a new logical plan after analyzing test failures.\n- MAPS: Use this to retry a specific AST edit if there was a syntax error feedback.\n- ABORT: Stop execution if stuck in an unresolvable environment error (e.g., linker/compiler missing) or infinite loop.\n\nValid next states: [SEARCH, DISPATCH, MAPS, THINKING, ABORT]\nOutput a RAW JSON object ONLY: {\"reasoning\": \"...\", \"next_state\": \"...\"}",
-      "user_prompt_template": "Intent: {{intent}}\nRetry Count: {{retry_count}}\nTest Output: {{test_stdout}}\nLLM Feedback: {{llm_feedback}}\nActive Plan: {{plan}}",
+      "system_prompt": "You are the Engine Orchestrator. Decide the next state based on the current job context, recent errors, and the active plan.\n\nSTATE DEFINITIONS:\n- SEARCH: Use this to physically EDIT SOURCE CODE based on the active plan.\n- DISPATCH: Use this ONLY to generate initial unit tests. NEVER use this to fix failing code.\n- THINKING: Use this to generate a new logical plan after analyzing test failures.\n- DOCS: Use this to retrieve documentation context when you are unsure about an API or symbol, or if naming in tests doesn't match the source.\n- MAPS: Use this to retry a specific AST edit if there was a syntax error feedback.\n- ABORT: Stop execution ONLY if stuck in an unresolvable environment error (e.g., linker/compiler missing) or infinite loop.\n\nALWAYS try DOCS if you are unsure about how to fix a compilation error related to types or missing methods.\n\nValid next states: [SEARCH, DISPATCH, MAPS, THINKING, DOCS, ABORT]\nOutput a RAW JSON object ONLY: {\"reasoning\": \"...\", \"next_state\": \"...\"}",
+      "user_prompt_template": "Intent: {{intent}}\nRetry Count: {{retry_count}}\nTest Output: {{test_stdout}}\nLLM Feedback: {{llm_feedback}}\nActive Plan: {{plan}}\nDocs: {{docs}}",
       "params": { "max_tokens": 512 },
       "post_process": "extract_json"
     },

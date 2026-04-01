@@ -9,7 +9,7 @@ import threading
 from typing import Any, Tuple, Dict, List, Optional
 from .core import State
 from .payloads import JobPayload
-from .primitives import ExtractAST, QueryLLM, ExecuteCommand, PromptUser, WriteFile, ASTSplice, BlockSplice
+from .primitives import ExtractAST, QueryLLM, ExecuteCommand, PromptUser, WriteFile, ASTSplice, BlockSplice, QueryMCP
 from .components import TreeSitterSensor
 
 logger = logging.getLogger("ariadne.states")
@@ -174,6 +174,11 @@ class EVALUATE(State):
         executor = ExecuteCommand()
         status, output = executor.tick(self.test_command)
         
+        # Truncate output to prevent context overflow in subsequent LLM states
+        if len(output) > 5000:
+            logger.info(f"Truncating test output (original length: {len(output)})")
+            output = output[:2500] + "\n... [TRUNCATED] ...\n" + output[-2500:]
+
         job.test_stdout = output
         
         if status == "SUCCESS":
@@ -212,11 +217,15 @@ class INTERVENE(State):
 
     def tick(self, payload: Any) -> Tuple[str, Any]:
         editor_cfg = self.config_manager.config.get("editor", {})
-        if editor_cfg.get("headless", False):
+        headless = editor_cfg.get("headless", False)
+        rpc_template = editor_cfg.get("rpc_command_template")
+
+        if headless and not rpc_template:
+            logger.warning("Headless mode active but no rpc_command_template provided. Skipping intervention.")
             next_state = get_payload_attr(payload, "next_headless_state", "ROUTER")
             return next_state, payload
 
-        command_template = editor_cfg.get("command_template", "nvim +{line} {file}")
+        command_template = rpc_template if headless else editor_cfg.get("command_template", "nvim +{line} {file}")
         
         # Scenario A: Intent Elaboration
         needs_elaboration = get_payload_attr(payload, "needs_elaboration", False)
@@ -231,8 +240,19 @@ class INTERVENE(State):
                 temp_path = tf.name
             
             cmd = command_template.format(line=5, file=temp_path)
-            logger.info(f"Opening editor for intent elaboration: {cmd}")
-            self._open_editor(cmd, payload)
+            
+            if headless:
+                logger.info(f"Sending intent to remote editor via RPC: {cmd}")
+                # Use shell=True on Windows to handle command templates more naturally
+                subprocess.run(cmd, shell=True)
+                print("\n" + "!"*60)
+                print("ACTION REQUIRED: Intent file sent to remote editor.")
+                print(f"File: {temp_path}")
+                input("Press ENTER here when you have SAVED and CLOSED the file in your editor...")
+                print("!"*60 + "\n")
+            else:
+                logger.info(f"Opening editor for intent elaboration: {cmd}")
+                self._open_editor(cmd, payload)
             
             with open(temp_path, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -252,8 +272,17 @@ class INTERVENE(State):
         if failing_file:
             line = get_payload_attr(payload, "failing_line", "1")
             cmd = command_template.format(line=line, file=failing_file)
-            logger.info(f"Opening editor for manual fix: {cmd}")
-            self._open_editor(cmd, payload)
+            
+            if headless:
+                logger.info(f"Sending failing file to remote editor via RPC: {cmd}")
+                subprocess.run(shlex.split(cmd))
+                print("\n" + "="*60)
+                print(f"Action Required: File opened in your remote editor via RPC: {failing_file}")
+                input("Press Enter here in the terminal when you are done making changes...")
+                print("="*60 + "\n")
+            else:
+                logger.info(f"Opening editor for manual fix: {cmd}")
+                self._open_editor(cmd, payload)
             
             # Clear failing info after intervention
             if isinstance(payload, dict):
@@ -350,7 +379,8 @@ class ROUTER(State):
                 "retry_count": job.retry_count,
                 "test_stdout": job.test_stdout,
                 "llm_feedback": getattr(job, "llm_feedback", "None"),
-                "plan": json.dumps(job.plan)
+                "plan": json.dumps(job.plan),
+                "docs": getattr(job, "docs", "None")
             }
         )
 
@@ -371,11 +401,6 @@ class ROUTER(State):
         next_state = decision.get("next_state", "ABORT")
         logger.info(f"Router decision: {next_state} (Reasoning: {decision.get('reasoning')})")
         
-        # Stuck protection
-        if job.retry_count > 5 and next_state in ["THINKING", "SEARCH"]:
-             logger.warning("Engine seems stuck in a loop. Recommending INTERVENE.")
-             return "INTERVENE", job
-
         job.retry_count += 1
         if job.retry_count > 10:
             logger.error("Max retries exceeded. Aborting.")
@@ -530,21 +555,27 @@ class MAPS(State):
         logger.info(f"MAPS Action: {action} on ID {target_id}")
 
         if action == "zoom":
-            if target_id is not None and target_id in id_map:
-                job.maps_state["navigation_stack"].append(id_map[target_id])
+            if target_id is not None and str(target_id) in id_map:
+                new_range = id_map[str(target_id)]
+                if new_range == (start_byte, end_byte):
+                    job.llm_feedback = f"You are already focused on {target_id}. Did you mean to zoom into a child ID instead?"
+                    return "MAPS", job
+                job.maps_state["navigation_stack"].append(new_range)
                 return "MAPS", job
             else:
-                job.llm_feedback = f"Invalid target_id for zoom: {target_id}"
+                job.llm_feedback = f"Invalid target_id for zoom: {target_id}. Available IDs: {list(id_map.keys())}"
                 return "MAPS", job
 
         elif action == "up":
             if len(job.maps_state["navigation_stack"]) > 1:
                 job.maps_state["navigation_stack"].pop()
+            else:
+                job.llm_feedback = "You are already at the top of the current symbol's AST view. You cannot go higher. If you need to add a method, use 'insert_after' or 'insert_before' on a child of the current node, or finalize this symbol and request a different one."
             return "MAPS", job
 
         elif action in ["replace", "delete", "insert_before", "insert_after"]:
-            if target_id is not None and target_id in id_map:
-                t_start, t_end = id_map[target_id]
+            if target_id is not None and str(target_id) in id_map:
+                t_start, t_end = id_map[str(target_id)]
                 
                 edit = {"start_byte": t_start, "end_byte": t_end, "new_code": code}
                 
@@ -558,7 +589,7 @@ class MAPS(State):
                 job.fixed_code["edits"].append(edit)
                 return "MAPS", job
             else:
-                job.llm_feedback = f"Invalid target_id for {action}: {target_id}"
+                job.llm_feedback = f"Invalid target_id for {action}: {target_id}. Available IDs: {list(id_map.keys())}"
                 return "MAPS", job
 
         elif action == "done":
@@ -649,3 +680,77 @@ class POST_MORTEM(State):
     def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
         logger.info("Repair session complete. summarized results.")
         return "FINISH", job
+
+
+class DOCS(State):
+    """
+    Retrieves and compresses documentation context using MCP or local search.
+    """
+    def __init__(self, config_manager):
+        super().__init__("DOCS")
+        self.config_manager = config_manager
+
+    def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
+        logger.info("Retrieving documentation context...")
+
+        model_info = self.config_manager.get_model_info("DOCS")
+        state_config = self.config_manager.config["states"]["DOCS"]
+        
+        # 1. Determine documentation source
+        # For Rust projects, we assume cargo doc has been run or we run it
+        # In this session, it was already run.
+        
+        mcp_cfg = self.config_manager.config.get("mcp", {})
+        if mcp_cfg.get("enabled", False):
+            logger.info("Using MCP to retrieve docs...")
+            query_mcp = QueryMCP()
+            status, result = query_mcp.tick({
+                "command": mcp_cfg.get("command"),
+                "args": mcp_cfg.get("args", []),
+                "tool_name": state_config.get("mcp_tool", "read_file"),
+                "tool_args": {
+                    "path": state_config.get("doc_index", "target/doc/index.html")
+                }
+            })
+            if status == "SUCCESS":
+                raw_docs = str(result)
+            else:
+                logger.warning(f"MCP failed to retrieve docs: {result}. Falling back to direct read.")
+                raw_docs = "Failed to retrieve docs via MCP."
+        else:
+            # Fallback: direct read of index.html if it exists
+            doc_path = state_config.get("doc_index", "target/doc/index.html")
+            if os.path.exists(doc_path):
+                try:
+                    with open(doc_path, 'r', encoding='utf-8') as f:
+                        raw_docs = f.read()
+                except Exception as e:
+                    raw_docs = f"Error reading docs: {e}"
+            else:
+                raw_docs = "No documentation found at " + doc_path
+
+        # 2. Agentic Filter/Compression
+        logger.info("Compressing documentation context...")
+        
+        user_prompt = self.config_manager.render_prompt(
+            state_config["user_prompt_template"],
+            {
+                "intent": job.intent,
+                "raw_docs": raw_docs[:3000] # Limit input to LLM to avoid context overflow
+            }
+        )
+
+        query = QueryLLM(model=model_info.get("model"), api_base=model_info.get("api_base"))
+        status, compressed_docs = query.tick({
+            "system": state_config["system_prompt"],
+            "user": user_prompt,
+            "params": model_info.get("params", {}),
+            "post_process": state_config.get("post_process")
+        })
+
+        if status == "SUCCESS":
+            job.docs = compressed_docs
+        else:
+            job.docs = "Failed to compress docs."
+
+        return "THINKING", job
