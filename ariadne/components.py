@@ -86,23 +86,37 @@ class TreeSitterSensor:
         # We parse the full source but focus on the node at the given range
         tree = self.parser.parse(source)
         
-        # Find the smallest node that covers the requested range
+        # TreeSitter's descendant_for_byte_range returns the smallest node that COVERS the range.
         node = tree.root_node.descendant_for_byte_range(start_byte, end_byte)
         
-        # If the descendant is the same as requested, or we want its children:
+        # FIX: If we asked for a range (like a block) and it returned a child (like the only statement in the block)
+        # because they have the same byte range, we should check if the parent also matches the range
+        # and has the type we might expect, or just use the parent if the descendant is too "deep".
+        
+        # If we are at a statement and ask for its range, we want to see ITS children.
+        # But if we are at a block and ask for ITS range, we want to see the statements.
+        
+        # A robust way is to check if the node we found is actually the one we wanted.
+        # If the parent has the EXACT SAME range, the parent is likely the 'container' (like a block)
+        while node.parent and node.parent.start_byte == start_byte and node.parent.end_byte == end_byte:
+            node = node.parent
+        
         view_lines = []
         id_map = {}
         
-        # Header for the view
+        # If the node has no children, but we're looking at it, we might want to see its text
+        if len(node.named_children) == 0:
+             view_lines.append(f"Current Node: {node.type} [{node.start_byte}-{node.end_byte}]")
+             view_lines.append(f" (No named children. Snippet: \"{node.text.decode('utf-8', errors='replace')}\")")
+             return "\n".join(view_lines), {}
+        
         view_lines.append(f"Current Node: {node.type} [{node.start_byte}-{node.end_byte}]")
         
         child_idx = 0
-        for child in node.children:
-            if not child.is_named:
-                continue
-                
+        # Use named_children for cleaner navigation
+        for child in node.named_children:
             # Get a snippet of the child's code for the view (first line or truncated)
-            child_code = child.text.decode("utf-8", errors="replace").split("\n")[0]
+            child_code = child.text.decode("utf-8", errors="replace").strip().split("\n")[0]
             if len(child_code) > 80:
                 child_code = child_code[:77] + "..."
             
