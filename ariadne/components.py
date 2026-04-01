@@ -1,5 +1,6 @@
 import logging
 from typing import Any, List, Dict, Tuple, Optional
+import tree_sitter
 from tree_sitter import Parser, Language, Tree, Node
 
 logger = logging.getLogger("ariadne.components")
@@ -12,23 +13,42 @@ class TreeSitterSensor:
         self.language = Language(language_ptr)
         self.parser = Parser(self.language)
 
+    def _get_captures(self, root_node: Node, query_str: str) -> List[Tuple[Node, str]]:
+        """
+        Helper to handle both dict-based and list-based captures across tree-sitter versions.
+        Returns a list of (node, capture_name) tuples.
+        """
+        query = tree_sitter.Query(self.language, query_str)
+        cursor = tree_sitter.QueryCursor(query)
+        captures = cursor.captures(root_node)
+        
+        normalized = []
+        if isinstance(captures, dict):
+            # Tree-sitter 0.25.2: Dict[str, List[Node]]
+            for name, nodes in captures.items():
+                for node in nodes:
+                    normalized.append((node, name))
+        else:
+            # Older versions: List[Tuple[Node, str]] or List[Tuple[Node, str, int]]
+            for item in captures:
+                if isinstance(item, tuple):
+                    # Unpack carefully
+                    node = item[0]
+                    name = item[1]
+                    normalized.append((node, name))
+        return normalized
+
     def skeletonize(self, source: bytes, query_str: str) -> str:
         """
         Strips function/method bodies based on a query to create a file skeleton.
         """
         tree = self.parser.parse(source)
-        query = self.language.query(query_str)
-        captures = query.captures(tree.root_node)
+        captures = self._get_captures(tree.root_node, query_str)
         
-        # We want to find bodies to replace with "{ ... }"
-        # Usually capture names like @body
         edits = []
         for node, name in captures:
             if name == "body":
                 edits.append((node.start_byte, node.end_byte, b" { ... }"))
-            elif name == "item" and not any(n == "body" for _, n in captures):
-                # If we captured an item but no body (like a signature), we keep it
-                pass
 
         # Sort edits in reverse order to maintain offset integrity
         edits.sort(key=lambda x: x[0], reverse=True)
@@ -44,8 +64,7 @@ class TreeSitterSensor:
         Executes a query and returns metadata for all nodes matching capture_name.
         """
         tree = self.parser.parse(source)
-        query = self.language.query(query_str)
-        captures = query.captures(tree.root_node)
+        captures = self._get_captures(tree.root_node, query_str)
         
         results = []
         for node, name in captures:

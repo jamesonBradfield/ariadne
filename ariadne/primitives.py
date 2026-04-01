@@ -47,26 +47,27 @@ class ExtractAST(State):
             query_cursor = tree_sitter.QueryCursor(query)
 
             results = []  # Initialize results list
-            # Some tree-sitter versions return a dict of {name: [nodes]}
-            # Others return a list of (node, name) tuples.
             captures = query_cursor.captures(tree.root_node)
             
+            # Normalize captures to List[Tuple[Node, str]]
+            normalized_captures = []
             if isinstance(captures, dict):
-                # Dict-based captures (newer API)
-                if capture_name in captures:
-                    for node in captures[capture_name]:
-                        results.append(
-                            source_code[node.start_byte : node.end_byte].decode("utf-8")
-                        )
+                # Tree-sitter 0.25.2: Dict[str, List[Node]]
+                for name, nodes in captures.items():
+                    for node in nodes:
+                        normalized_captures.append((node, name))
             else:
-                # Tuple-based captures (older/standard API)
-                for capture_item in captures:
-                    if isinstance(capture_item, tuple) and len(capture_item) == 2:
-                        node, name = capture_item
-                        if name == capture_name:
-                            results.append(
-                                source_code[node.start_byte : node.end_byte].decode("utf-8")
-                            )
+                # Older/standard versions: List[Tuple[Node, str, index]] or List[Tuple[Node, str]]
+                for item in captures:
+                    if isinstance(item, tuple) and len(item) >= 2:
+                        normalized_captures.append((item[0], item[1]))
+
+            # Process normalized captures
+            for node, name in normalized_captures:
+                if name == capture_name:
+                    results.append(
+                        source_code[node.start_byte : node.end_byte].decode("utf-8")
+                    )
 
             return "SUCCESS" if results else "NOT_FOUND", results
         except Exception as e:
@@ -148,34 +149,42 @@ class QueryLLM(State):
 
             # Post-Processing Logic
             if post_process == "extract_json":
-                # Robust extraction: find the outermost { } pair
-                # This must happen BEFORE stripping <think> tokens just in case
-                # the model provided a valid JSON but put it inside/after think
-                start_index = content.find("{")
+                # Strip thinking tokens if present (common in Qwen models)
+                # First, strip balanced tags
+                content_clean = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+                # Then strip orphaned tags (often seen if output was truncated or messy)
+                content_clean = re.sub(r"</?think>", "", content_clean, flags=re.IGNORECASE).strip()
+
+                # Robust extraction: find the outermost { } pair in the cleaned content
+                start_index = content_clean.find("{")
                 if start_index != -1:
                     bracket_count = 0
-                    for i in range(start_index, len(content)):
-                        if content[i] == "{":
+                    for i in range(start_index, len(content_clean)):
+                        if content_clean[i] == "{":
                             bracket_count += 1
-                        elif content[i] == "}":
+                        elif content_clean[i] == "}":
                             bracket_count -= 1
                             if bracket_count == 0:
-                                json_str = content[start_index : i + 1]
+                                json_str = content_clean[start_index : i + 1]
                                 try:
                                     return "SUCCESS", json.loads(json_str)
                                 except json.JSONDecodeError:
+                                    # Try to fix common JSON issues like trailing commas if needed
+                                    # but for now, we'll just break and try global parse
                                     break
                 
-                # Strip thinking tokens if present (common in Qwen models) and try again
-                cleaned_content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+                # If block extraction failed, try a global parse on cleaned content
                 try:
-                    return "SUCCESS", json.loads(cleaned_content)
+                    return "SUCCESS", json.loads(content_clean)
                 except json.JSONDecodeError:
                     return "JSON_ERROR", content
 
             if post_process == "strip_markdown":
                 # Strip thinking tokens if present
                 cleaned_content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+                # Also strip orphaned tags
+                cleaned_content = re.sub(r"</?think>", "", cleaned_content, flags=re.IGNORECASE).strip()
+                
                 code_match = re.search(r"```(?:\w+)?\n(.*?)\n```", cleaned_content, re.DOTALL)
                 if code_match:
                     return "SUCCESS", code_match.group(1).strip()

@@ -93,6 +93,12 @@ class DISPATCH(State):
             status, result = self.profile.get_skeleton(f)
             if status == "SUCCESS":
                 skeletons.append(f"File: {f}\n{result}")
+            else:
+                # FALLBACK: If skeletonization fails, provide full file (LLM will handle it if small)
+                try:
+                    with open(f, 'r', encoding='utf-8') as src:
+                        skeletons.append(f"File: {f} (Full Source)\n{src.read()}")
+                except Exception: pass
 
         skeleton_context = "\n\n".join(skeletons)
 
@@ -182,8 +188,6 @@ class EVALUATE(State):
                 logger.info(f"Detected failure location at {failing_file}:{failing_line}. Hints added to payload.")
                 job.failing_file = failing_file
                 job.failing_line = failing_line
-                # We NO LONGER transition directly to INTERVENE. 
-                # Let THINKING try to fix it automatically first.
 
             return "THINKING", job
 
@@ -283,6 +287,12 @@ class THINKING(State):
             status, result = self.profile.get_skeleton(f)
             if status == "SUCCESS":
                 skeletons.append(f"File: {f}\n{result}")
+            else:
+                # FALLBACK: Provide full source if skeletonization failed
+                try:
+                    with open(f, 'r', encoding='utf-8') as src:
+                        skeletons.append(f"File: {f} (Full Source)\n{src.read()}")
+                except Exception: pass
         
         skeleton_context = "\n\n".join(skeletons)
         symbols = self.profile.get_available_symbols(job.target_files)
@@ -355,13 +365,16 @@ class ROUTER(State):
         })
 
         if status != "SUCCESS":
-            return "ABORT", job
+            # FALLBACK: If LLM response was messy/invalid JSON, try to recover
+            logger.warning(f"Router received invalid response ({status}). Attempting recovery...")
+            if job.retry_count < 3:
+                return "THINKING", job
+            return "INTERVENE", job
 
         next_state = decision.get("next_state", "ABORT")
         logger.info(f"Router decision: {next_state} (Reasoning: {decision.get('reasoning')})")
         
-        # If the LLM is stuck and repeating THINKING/MAPS too many times, 
-        # let's suggest INTERVENE as a circuit breaker.
+        # Stuck protection
         if job.retry_count > 5 and next_state in ["THINKING", "SEARCH"]:
              logger.warning("Engine seems stuck in a loop. Recommending INTERVENE.")
              return "INTERVENE", job
@@ -395,18 +408,22 @@ class SEARCH(State):
             symbol = step["symbol"]
             for filepath in job.target_files:
                 if not os.path.exists(filepath): continue
-                status, nodes = self.profile.find_symbol(filepath, symbol)
-                if status == "SUCCESS" and nodes:
-                    for node in nodes:
-                        extracted_nodes.append({
-                            "filepath": filepath,
-                            "symbol": symbol,
-                            "node_string": node["code"],
-                            "start_byte": node["start_byte"],
-                            "end_byte": node["end_byte"],
-                            "node_type": node["type"]
-                        })
-                    break
+                try:
+                    status, nodes = self.profile.find_symbol(filepath, symbol)
+                    if status == "SUCCESS" and nodes:
+                        for node in nodes:
+                            extracted_nodes.append({
+                                "filepath": filepath,
+                                "symbol": symbol,
+                                "node_string": node["code"],
+                                "start_byte": node["start_byte"],
+                                "end_byte": node["end_byte"],
+                                "node_type": node["type"]
+                            })
+                        break
+                except Exception as e:
+                    logger.error(f"Error searching for {symbol} in {filepath}: {e}")
+                    continue
         
         if not extracted_nodes:
             logger.warning("No symbols from plan were found in codebase.")

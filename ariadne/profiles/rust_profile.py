@@ -1,5 +1,5 @@
 import tree_sitter_rust as tsrust
-from typing import Any, List
+from typing import Any, List, Dict
 from .base import BaseProfile
 
 class RustProfile(BaseProfile):
@@ -24,13 +24,11 @@ class RustProfile(BaseProfile):
         """
         return """
         (function_item (block) @body)
-        (function_signature_item) @item
-        (impl_item (block) @body)
         """
 
     def get_symbol_query(self, symbol_name: str) -> str:
         """
-        Query to find a specific function or method by name.
+        Query to find a specific function, method, or struct by name.
         """
         return f"""
         (function_item
@@ -38,8 +36,13 @@ class RustProfile(BaseProfile):
             (#eq? @name "{symbol_name}")
         ) @symbol
 
+        (struct_item
+            name: (type_identifier) @name
+            (#eq? @name "{symbol_name}")
+        ) @symbol
+
         (impl_item
-            name: (identifier) @name
+            type: (type_identifier) @name
             (#eq? @name "{symbol_name}")
         ) @symbol
         """
@@ -50,11 +53,12 @@ class RustProfile(BaseProfile):
 
     def get_available_symbols(self, filepaths: List[str]) -> List[str]:
         """
-        Extracts all function and method names from the target files.
+        Extracts all function and struct names from the target files.
         """
         query = """
         (function_item name: (identifier) @name)
-        (impl_item name: (identifier) @name)
+        (struct_item name: (type_identifier) @name)
+        (impl_item type: (type_identifier) @name)
         """
         symbols = []
         for path in filepaths:
