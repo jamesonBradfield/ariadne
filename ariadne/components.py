@@ -1,4 +1,5 @@
 import logging
+import subprocess
 from typing import Any, List, Dict, Tuple, Optional
 import tree_sitter
 from tree_sitter import Parser, Language, Tree, Node
@@ -147,3 +148,28 @@ class SyntaxGate:
             return self.sensor.validate_repair(source, edits)
         except Exception as e:
             return False, str(e)
+
+class SubprocessSensor:
+    """
+    Primitive for running shell commands and capturing output.
+    Used by legacy hooks and profiles.
+    """
+    def __init__(self, command: List[str]):
+        self.command = command
+
+    def execute(self) -> Dict[str, Any]:
+        try:
+            res = subprocess.run(self.command, capture_output=True, text=True)
+            return {
+                "success": res.returncode == 0,
+                "stdout": res.stdout,
+                "stderr": res.stderr,
+                "returncode": res.returncode
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "stdout": "",
+                "stderr": str(e),
+                "returncode": -1
+            }

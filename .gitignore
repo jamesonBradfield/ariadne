@@ -1,10 +1,20 @@
-.venv
-
-# Python
+.venv/
 __pycache__/
 *.pyc
 
 # Rust / Build Artifacts
+target/
 *.o
 *.exe
+*.pdb
+
+# Ariadne Run Artifacts
+test.rs
+test_contract.rs
+test_contract.py
 ariadne_temp_test.*
+benchmark_results.json
+
+# Specialized Artifacts
+C
+RealRustTest/

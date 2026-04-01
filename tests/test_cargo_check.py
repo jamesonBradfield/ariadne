@@ -1,8 +1,8 @@
+import pytest
 from ariadne.profiles.rust_godot import CargoCheckHook
 
-
-def test_cargo_check_hook():
-    """Test that the CargoCheckHook component can be instantiated and executed."""
+def test_cargo_check_hook_structure():
+    """Test that the CargoCheckHook component returns the expected dictionary structure."""
     hook = CargoCheckHook()
     result = hook.execute()
 
@@ -12,17 +12,7 @@ def test_cargo_check_hook():
     assert "messages" in result
     assert "errors" in result
     assert "raw_output" in result
-
-    print("CargoCheckHook test passed: returns expected dictionary structure")
-    print(f"Success: {result['success']}")
-    print(f"Number of messages: {len(result['messages'])}")
-    print(f"Number of errors: {len(result['errors'])}")
-    print(f"Actual Errors: {result['errors']}")
-
-    # We don't require success because we might not have a valid Rust project
-    # but we do require that the component runs without throwing
-    return True
-
-
-if __name__ == "__main__":
-    test_cargo_check_hook()
+    
+    # Even if it fails (no rust project), it should return a result
+    if not result["success"]:
+        assert isinstance(result["errors"], list)

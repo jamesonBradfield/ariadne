@@ -1,45 +1,28 @@
-import tree_sitter_rust
+import pytest
 from ariadne.components import SyntaxGate
+from ariadne.profiles.rust_profile import RustProfile
 
-
-def test_syntax_gate():
-    gate = SyntaxGate(tree_sitter_rust.language())
-
+def test_syntax_gate_valid_rust():
+    profile = RustProfile()
+    gate = SyntaxGate(profile)
+    
     # Valid Rust code
-    valid_code = """
-fn take_damage(&mut self, amount: i32) {
-    println!("Hello {}", amount);
-}
-"""
-    result = gate.validate(valid_code)
-    print("Valid code test:")
-    print(f"  Valid: {result['valid']}")
-    if not result["valid"]:
-        print(f"  Error: {result['error_message']}")
+    # fn main() { ... }
+    # 012345678901
+    # { is at index 10
+    # } is at index 11
+    is_valid, error = gate.sensor.validate_repair(b"fn main() {}", [{"start_byte": 11, "end_byte": 11, "new_code": "println!(\"hi\");"}])
+    if not is_valid:
+        print(f"DEBUG: {error}")
+    assert is_valid
+    assert error is None
 
+def test_syntax_gate_invalid_rust():
+    profile = RustProfile()
+    gate = SyntaxGate(profile)
+    
     # Invalid Rust code
-    invalid_code = """
-fn take_damage(&mut self, amount: i32) {
-    println!("Hello {}", amount)
-} // missing semicolon
-"""
-    result2 = gate.validate(invalid_code)
-    print("\nInvalid code test:")
-    print(f"  Valid: {result2['valid']}")
-    if not result2["valid"]:
-        print(f"  Error: {result2['error_message']}")
-
-    # Another invalid: completely wrong
-    invalid2 = "this is not rust"
-    result3 = gate.validate(invalid2)
-    print("\nCompletely invalid test:")
-    print(f"  Valid: {result3['valid']}")
-    if not result3["valid"]:
-        print(f"  Error: {result3['error_message']}")
-
-    return result["valid"] and not result2["valid"] and not result3["valid"]
-
-
-if __name__ == "__main__":
-    success = test_syntax_gate()
-    print(f"\nAll tests passed: {success}")
+    is_valid, error = gate.sensor.validate_repair(b"fn main() { let x = ; }", [])
+    
+    assert not is_valid
+    assert "Syntax error" in error
