@@ -218,6 +218,7 @@ class QueryLLM(State):
         user = payload.get("user", "")
         params = payload.get("params", {})
         post_process = payload.get("post_process")
+        response_model = payload.get("response_model")
 
         logger.info(f"[LLM REQUEST] System Prompt: {system}")
         logger.info(f"[LLM REQUEST] User Prompt: {user}")
@@ -244,52 +245,36 @@ class QueryLLM(State):
             if self.api_key:
                 completion_args["api_key"] = self.api_key
             
-            # Handle litellm's specific JSON mode if requested via params or post_process
-            # DISABLE for local servers as it often causes empty responses
-            if post_process == "extract_json" and "localhost" not in self.api_base:
-                 completion_args["response_format"] = {"type": "json_object"}
+            # Use native structured output if response_model is provided
+            if response_model:
+                completion_args["response_format"] = response_model
 
             response = litellm.completion(**completion_args)
-            content = response.choices[0].message.content
             
+            if response_model:
+                # litellm returns the parsed model object in message.content for supported providers
+                # or we can access it via response.choices[0].message.content if it's just a string
+                content = response.choices[0].message.content
+                if hasattr(content, "model_dump"): # It's a Pydantic object
+                    logger.info(f"[LLM RESPONSE] Structured Data: {content.model_dump_json()}")
+                    return "SUCCESS", content
+                else:
+                    # It might be a JSON string that litellm didn't auto-parse (common with some providers)
+                    logger.info(f"[LLM RESPONSE] Raw Content (Expected JSON): {content}")
+                    try:
+                        import json
+                        parsed = response_model.model_validate_json(content)
+                        return "SUCCESS", parsed
+                    except Exception as e:
+                        logger.error(f"Failed to validate JSON against model: {e}")
+                        return "JSON_ERROR", content
+
+            content = response.choices[0].message.content
             logger.info(f"[LLM RESPONSE] Raw Content: {content}")
 
-            # Post-Processing Logic
-            if post_process == "extract_json":
-                # Strip thinking tokens if present (common in Qwen models)
-                # First, strip balanced tags
-                content_clean = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-                # Then strip orphaned tags (often seen if output was truncated or messy)
-                content_clean = re.sub(r"</?think>", "", content_clean, flags=re.IGNORECASE).strip()
-
-                # Robust extraction: find the outermost { } pair in the cleaned content
-                start_index = content_clean.find("{")
-                if start_index != -1:
-                    bracket_count = 0
-                    for i in range(start_index, len(content_clean)):
-                        if content_clean[i] == "{":
-                            bracket_count += 1
-                        elif content_clean[i] == "}":
-                            bracket_count -= 1
-                            if bracket_count == 0:
-                                json_str = content_clean[start_index : i + 1]
-                                try:
-                                    return "SUCCESS", json.loads(json_str)
-                                except json.JSONDecodeError:
-                                    # Try to fix common JSON issues like trailing commas if needed
-                                    # but for now, we'll just break and try global parse
-                                    break
-                
-                # If block extraction failed, try a global parse on cleaned content
-                try:
-                    return "SUCCESS", json.loads(content_clean)
-                except json.JSONDecodeError:
-                    return "JSON_ERROR", content
-
+            # Legacy Post-Processing Logic (Strip Markdown etc.)
             if post_process == "strip_markdown":
-                # Strip thinking tokens if present
                 cleaned_content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-                # Also strip orphaned tags
                 cleaned_content = re.sub(r"</?think>", "", cleaned_content, flags=re.IGNORECASE).strip()
                 
                 code_match = re.search(r"```(?:\w+)?\n(.*?)\n```", cleaned_content, re.DOTALL)
@@ -323,21 +308,8 @@ class QueryLLM(State):
                     elif state == "IN_REPLACE":
                         replace_lines.append(line)
                 
-                # Clean up potential markdown code fences from the beginning/end of blocks
-                if search_lines and search_lines[0].strip().startswith("```"):
-                    search_lines.pop(0)
-                if search_lines and search_lines[-1].strip() == "```":
-                    search_lines.pop()
-                    
-                if replace_lines and replace_lines[0].strip().startswith("```"):
-                    replace_lines.pop(0)
-                if replace_lines and replace_lines[-1].strip() == "```":
-                    replace_lines.pop()
-                
                 if search_lines or replace_lines:
-                    # Detect line endings from content (simple heuristic)
                     line_ending = "\r\n" if "\r\n" in cleaned_content else "\n"
-                    
                     search_text = line_ending.join(search_lines)
                     replace_text = line_ending.join(replace_lines)
                     return "SUCCESS", {"search": search_text, "replace": replace_text}

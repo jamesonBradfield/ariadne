@@ -3,3 +3,4 @@ textual>=0.50.0
 pyperclip
 mcp
 ast-grep-py
+pydantic

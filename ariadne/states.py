@@ -8,25 +8,15 @@ import json
 import threading
 from typing import Any, Tuple, Dict, List, Optional
 from .core import State
-from .payloads import JobPayload
-from .primitives import ExtractAST, QueryLLM, ExecuteCommand, PromptUser, WriteFile, ASTSplice, BlockSplice, QueryMCP
+from .payloads import (
+    JobPayload, RouterResponse, ThinkingResponse, 
+    MapsNavResponse, MapsThinkResponse, MapsSurgeonResponse
+)
+from .primitives import ExtractAST, QueryLLM, ExecuteCommand, PromptUser, WriteFile, ASTSplice, BlockSplice, QueryMCP, QueryAstGrep
 from .lsp import LSPManager
 from .components import TreeSitterSensor
 
 logger = logging.getLogger("ariadne.states")
-
-def get_payload_attr(payload: Any, attr: str, default: Any = None) -> Any:
-    """Safely gets an attribute from either a JobPayload object or a dict."""
-    if isinstance(payload, dict):
-        return payload.get(attr, default)
-    return getattr(payload, attr, default)
-
-def set_payload_attr(payload: Any, attr: str, value: Any) -> None:
-    """Safely sets an attribute on either a JobPayload object or a dict."""
-    if isinstance(payload, dict):
-        payload[attr] = value
-    else:
-        setattr(payload, attr, value)
 
 class TRIAGE(State):
     """
@@ -45,7 +35,7 @@ class TRIAGE(State):
         system_prompt = state_config["system_prompt"]
         user_prompt = self.config_manager.render_prompt(
             state_config["user_prompt_template"],
-            {"input": get_payload_attr(payload, "input", "") or get_payload_attr(payload, "intent", "")}
+            {"input": payload.get("input", "") or payload.get("intent", "")}
         )
 
         query = QueryLLM(model=model_info.get("model"), api_base=model_info.get("api_base"))
@@ -65,10 +55,10 @@ class TRIAGE(State):
 
         job = JobPayload(
             intent=technical_intent.strip(),
-            target_files=get_payload_attr(payload, "target_files", [])
+            target_files=payload.get("target_files", [])
         )
         # Preserve app reference
-        job.app = get_payload_attr(payload, "app")
+        job.app = payload.get("app")
 
         return "DISPATCH", job
 
@@ -112,7 +102,7 @@ class DISPATCH(State):
         )
 
         # Inject app into prompt_user for TUI support
-        if hasattr(job, "app") and job.app:
+        if job.app:
             self.prompt_user.app = job.app
 
         query = QueryLLM(model=model_info.get("model"), api_base=model_info.get("api_base"))
@@ -205,33 +195,30 @@ class INTERVENE(State):
         super().__init__("INTERVENE")
         self.config_manager = config_manager
 
-    def _open_editor(self, command: str, payload: Any) -> None:
+    def _open_editor(self, command: str, job: JobPayload) -> None:
         """Helper to open editor safely in TUI or CLI mode."""
-        app = get_payload_attr(payload, "app")
-        if app:
+        if job.app:
             from .tui import EditorMessage
             completion_event = threading.Event()
-            app.post_message(EditorMessage(command, completion_event))
+            job.app.post_message(EditorMessage(command, completion_event))
             completion_event.wait()
         else:
             subprocess.run(shlex.split(command))
 
-    def tick(self, payload: Any) -> Tuple[str, Any]:
+    def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
         editor_cfg = self.config_manager.config.get("editor", {})
         headless = editor_cfg.get("headless", False)
         rpc_template = editor_cfg.get("rpc_command_template")
 
         if headless and not rpc_template:
             logger.warning("Headless mode active but no rpc_command_template provided. Skipping intervention.")
-            next_state = get_payload_attr(payload, "next_headless_state", "ROUTER")
-            return next_state, payload
+            return job.next_headless_state, job
 
         command_template = rpc_template if headless else editor_cfg.get("command_template", "nvim +{line} {file}")
         
         # Scenario A: Intent Elaboration
-        needs_elaboration = get_payload_attr(payload, "needs_elaboration", False)
-        if needs_elaboration:
-            original_intent = get_payload_attr(payload, "intent", "")
+        if job.needs_elaboration:
+            original_intent = job.intent
             with tempfile.NamedTemporaryFile(suffix=".md", mode='w', encoding='utf-8', delete=False) as tf:
                 tf.write("# Ariadne Intent Elaboration\n")
                 tf.write("Edit the text below to refine your coding objective.\n")
@@ -253,7 +240,7 @@ class INTERVENE(State):
                 print("!"*60 + "\n")
             else:
                 logger.info(f"Opening editor for intent elaboration: {cmd}")
-                self._open_editor(cmd, payload)
+                self._open_editor(cmd, job)
             
             with open(temp_path, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -262,40 +249,33 @@ class INTERVENE(State):
             
             os.unlink(temp_path)
             
-            final_intent = new_intent if new_intent else original_intent
-            set_payload_attr(payload, "intent", final_intent)
-            set_payload_attr(payload, "needs_elaboration", False)
+            job.intent = new_intent if new_intent else original_intent
+            job.needs_elaboration = False
                 
-            return "TRIAGE", payload
+            return "TRIAGE", job
 
         # Scenario B: Manual Fix Intervention
-        failing_file = get_payload_attr(payload, "failing_file")
-        if failing_file:
-            line = get_payload_attr(payload, "failing_line", "1")
-            cmd = command_template.format(line=line, file=failing_file)
+        if job.failing_file:
+            line = job.failing_line or "1"
+            cmd = command_template.format(line=line, file=job.failing_file)
             
             if headless:
                 logger.info(f"Sending failing file to remote editor via RPC: {cmd}")
-                subprocess.run(shlex.split(cmd))
+                subprocess.run(cmd, shell=True)
                 print("\n" + "="*60)
-                print(f"Action Required: File opened in your remote editor via RPC: {failing_file}")
+                print(f"Action Required: File opened in your remote editor via RPC: {job.failing_file}")
                 input("Press Enter here in the terminal when you are done making changes...")
                 print("="*60 + "\n")
             else:
                 logger.info(f"Opening editor for manual fix: {cmd}")
-                self._open_editor(cmd, payload)
+                self._open_editor(cmd, job)
             
-            # Clear failing info after intervention
-            if isinstance(payload, dict):
-                payload.pop("failing_file", None)
-                payload.pop("failing_line", None)
-            else:
-                if hasattr(payload, "failing_file"): delattr(payload, "failing_file")
-                if hasattr(payload, "failing_line"): delattr(payload, "failing_line")
+            job.failing_file = None
+            job.failing_line = None
                 
-            return "EVALUATE", payload
+            return "EVALUATE", job
 
-        return "ROUTER", payload
+        return "ROUTER", job
 
 
 class THINKING(State):
@@ -344,17 +324,14 @@ class THINKING(State):
             "system": state_config["system_prompt"],
             "user": user_prompt,
             "params": model_info.get("params", {}),
-            "post_process": state_config.get("post_process")
+            "response_model": ThinkingResponse
         })
 
         if status != "SUCCESS":
             return "ROUTER", job
 
         job.plan = plan
-        
-        if not hasattr(job, "plan_history"):
-            job.plan_history = []
-        job.plan_history.append(plan.get("reasoning", "Plan update"))
+        job.plan_history.append(plan.reasoning)
         
         return "ROUTER", job
 
@@ -379,9 +356,9 @@ class ROUTER(State):
                 "intent": job.intent,
                 "retry_count": job.retry_count,
                 "test_stdout": job.test_stdout,
-                "llm_feedback": getattr(job, "llm_feedback", "None"),
-                "plan": json.dumps(job.plan),
-                "docs": getattr(job, "docs", "None")
+                "llm_feedback": job.llm_feedback or "None",
+                "plan": job.plan.model_dump_json() if job.plan else "None",
+                "docs": job.docs or "None"
             }
         )
 
@@ -390,7 +367,7 @@ class ROUTER(State):
             "system": state_config["system_prompt"],
             "user": user_prompt,
             "params": model_info.get("params", {}),
-            "post_process": state_config.get("post_process")
+            "response_model": RouterResponse
         })
 
         if status != "SUCCESS":
@@ -399,8 +376,8 @@ class ROUTER(State):
                 return "THINKING", job
             return "INTERVENE", job
 
-        next_state = decision.get("next_state", "ABORT")
-        logger.info(f"Router decision: {next_state} (Reasoning: {decision.get('reasoning')})")
+        next_state = decision.next_state
+        logger.info(f"Router decision: {next_state} (Reasoning: {decision.reasoning})")
         
         job.retry_count += 1
         if job.retry_count > 10:
@@ -572,15 +549,15 @@ class MAPS_NAV(State):
             "system": state_config["system_prompt"],
             "user": user_prompt,
             "params": model_info.get("params", {}),
-            "post_process": state_config.get("post_process")
+            "response_model": MapsNavResponse
         })
 
         if status != "SUCCESS":
-            job.llm_feedback = f"Failed to parse your response as JSON. Ensure you only output valid JSON with properly escaped quotes: {result}"
+            job.llm_feedback = f"Failed to get structured navigation response: {result}"
             return "ROUTER", job
 
-        action = result.get("action")
-        target_id = result.get("target_id")
+        action = result.action
+        target_id = result.target_id
         
         if action == "zoom":
             if target_id is not None and str(target_id) in id_map:
@@ -615,7 +592,7 @@ class MAPS_NAV(State):
                 job.llm_feedback = f"Invalid target_id for select: {target_id}. Available IDs: {list(id_map.keys())}"
                 return "MAPS_NAV", job
 
-        job.llm_feedback = f"Unknown action or missing target_id: {result}"
+        job.llm_feedback = f"Unknown action: {action}"
         return "MAPS_NAV", job
 
 
@@ -675,14 +652,14 @@ class MAPS_THINK(State):
             "system": state_config["system_prompt"],
             "user": user_prompt,
             "params": model_info.get("params", {}),
-            "post_process": state_config.get("post_process")
+            "response_model": MapsThinkResponse
         })
 
         if status != "SUCCESS":
-            job.llm_feedback = f"Failed to parse JSON. Raw output: {result}"
+            job.llm_feedback = f"Failed to get structured diagnosis: {result}"
             return "ROUTER", job
 
-        if result.get("action") == "skip":
+        if result.action == "skip":
             logger.info("MAPS_THINK chose to skip. No changes needed for this symbol.")
             job.maps_state["current_step_index"] += 1
             job.fixed_code = None
@@ -690,10 +667,10 @@ class MAPS_THINK(State):
                 del job.maps_state["navigation_stack"]
             return "SENSE", job
 
-        if result.get("action") == "abort":
+        if result.action == "abort":
             return "MAPS_NAV", job
         
-        job.maps_state["draft_code"] = result.get("draft_code", "")
+        job.maps_state["draft_code"] = result.draft_code
         return "MAPS_SURGEON", job
 
 
@@ -728,15 +705,15 @@ class MAPS_SURGEON(State):
             "system": state_config["system_prompt"],
             "user": user_prompt,
             "params": model_info.get("params", {}),
-            "post_process": state_config.get("post_process")
+            "response_model": MapsSurgeonResponse
         })
 
         if status != "SUCCESS":
-            job.llm_feedback = f"Failed to parse JSON. Raw output: {result}"
+            job.llm_feedback = f"Failed to get structured surgical command: {result}"
             return "ROUTER", job
 
-        action = result.get("action")
-        code = result.get("code", "")
+        action = result.action
+        code = result.code
         target_id = job.maps_state["locked_node_id"]
         id_map = job.maps_state["id_map"]
         
