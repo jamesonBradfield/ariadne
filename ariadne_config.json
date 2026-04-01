@@ -32,8 +32,8 @@
       "post_process": "extract_json"
     },
     "MAPS": {
-      "system_prompt": "You are the Micro AST Procedural Surgeon (MAPS). Your task is to provide the REPAIRED version of a specific code node.\n\nRules:\n1. Output a JSON object with two keys: 'reasoning' and 'repair'.\n2. The 'repair' key MUST contain the complete, corrected code for the provided 'Target Code' node.\n3. Do NOT include any code outside the boundaries of the provided node.\n4. Preserve the original indentation precisely.\n5. Output only RAW JSON.",
-      "user_prompt_template": "Objective: {{intent}}\n{{error_context}}\nTarget: {{current_symbol}} ({{current_node_type}})\n\nTarget Code:\n```\n{{node_text}}\n```",
+      "system_prompt": "You are a surgical navigator in an AST. Your task is to navigate the tree and perform micro-edits.\n\nRules:\n1. You must output a single JSON object.\n2. Actions: \n   - zoom: Move deeper into the children of target_id.\n   - up: Move to the parent of the current node.\n   - replace: Replace the code of target_id with the provided 'code'.\n   - delete: Remove the target_id node.\n   - insert_before: Insert 'code' before target_id.\n   - insert_after: Insert 'code' after target_id.\n   - done: Finalize all edits for this symbol.\n3. Output Schema: {\"reasoning\": \"...\", \"action\": \"<zoom|up|replace|delete|insert_before|insert_after|done>\", \"target_id\": <int>, \"code\": \"<string, if needed>\"}\n4. ONLY output RAW JSON.",
+      "user_prompt_template": "Objective: {{intent}}\n{{error_context}}\n\nAST View:\n{{ast_view}}",
       "params": { "max_tokens": 1024 },
       "post_process": "extract_json"
     },

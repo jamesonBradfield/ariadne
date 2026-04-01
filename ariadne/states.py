@@ -464,7 +464,7 @@ class SENSE(State):
 
 class MAPS(State):
     """
-    Surgeon state. Generates a surgical SEARCH/REPLACE patch for the sensed node.
+    Surgeon state. Implements the recursive AST Drill-Down Protocol.
     """
     def __init__(self, config_manager, profile):
         super().__init__("MAPS")
@@ -475,59 +475,96 @@ class MAPS(State):
         if not job.extracted_nodes:
             return "SENSE", job
 
-        # Always operate on the first sensed node for the current symbol
         target_node = job.extracted_nodes[0]
         
-        logger.info(f"MAPS operating on {target_node['symbol']}...")
-
+        # Initialize navigation state if not present
+        if "navigation_stack" not in job.maps_state:
+            job.maps_state["navigation_stack"] = [(target_node["start_byte"], target_node["end_byte"])]
+            job.fixed_code = {
+                "filepath": target_node["filepath"],
+                "edits": []
+            }
+        
+        # Get current focus from stack
+        start_byte, end_byte = job.maps_state["navigation_stack"][-1]
+        
+        # Render the current view
+        sensor = TreeSitterSensor(self.profile.get_language_ptr())
+        with open(target_node["filepath"], "rb") as f:
+            source = f.read()
+        
+        ast_view, id_map = sensor.render_node_children(source, start_byte, end_byte)
+        
         model_info = self.config_manager.get_model_info("MAPS")
         state_config = self.config_manager.config["states"]["MAPS"]
 
         error_context = ""
         if hasattr(job, "llm_feedback") and job.llm_feedback:
-            error_context = f"PREVIOUS ATTEMPT FAILED SYNTAX CHECK:\n{job.llm_feedback}\nPlease correct your SEARCH/REPLACE logic."
-
-        # Inject Architect reasoning for context
-        reasoning = job.plan.get("reasoning", "")
-        combined_intent = f"PLAN REASONING: {reasoning}\n\nTECHNICAL OBJECTIVE: {job.intent}"
-
-        # STRICTER PROMPT: Explicitly forbid over-generation
-        maps_system_prompt = state_config["system_prompt"] + "\n\n**CRITICAL RULE:** Your REPLACE block must contain ONLY the code for the target node. DO NOT include implementation blocks if you are editing a struct. DO NOT include other functions. Stay within the boundaries of the provided 'Target Code'."
+            error_context = f"PREVIOUS ATTEMPT FAILED SYNTAX CHECK:\n{job.llm_feedback}\n"
 
         user_prompt = self.config_manager.render_prompt(
             state_config["user_prompt_template"],
             {
-                "intent": combined_intent,
+                "intent": job.intent,
                 "error_context": error_context,
-                "current_symbol": target_node["symbol"],
-                "current_node_type": target_node["node_type"],
-                "node_text": target_node["node_string"]
+                "ast_view": ast_view
             }
         )
 
         query = QueryLLM(model=model_info.get("model"), api_base=model_info.get("api_base"))
         status, result = query.tick({
-            "system": maps_system_prompt,
+            "system": state_config["system_prompt"],
             "user": user_prompt,
             "params": model_info.get("params", {}),
             "post_process": state_config.get("post_process")
         })
 
         if status != "SUCCESS":
-            job.llm_feedback = f"Failed to generate valid repair block: {result}"
+            job.llm_feedback = f"Failed to get navigation action: {result}"
             return "ROUTER", job
 
-        # New protocol: Replace entire node with 'repair' block
-        job.fixed_code = {
-            "filepath": target_node["filepath"],
-            "edits": [{
-                "start_byte": target_node["start_byte"],
-                "end_byte": target_node["end_byte"],
-                "new_code": result["repair"]
-            }]
-        }
+        action = result.get("action")
+        target_id = result.get("target_id")
+        code = result.get("code", "")
         
-        return "SYNTAX_GATE", job
+        logger.info(f"MAPS Action: {action} on ID {target_id}")
+
+        if action == "zoom":
+            if target_id is not None and target_id in id_map:
+                job.maps_state["navigation_stack"].append(id_map[target_id])
+                return "MAPS", job
+            else:
+                job.llm_feedback = f"Invalid target_id for zoom: {target_id}"
+                return "MAPS", job
+
+        elif action == "up":
+            if len(job.maps_state["navigation_stack"]) > 1:
+                job.maps_state["navigation_stack"].pop()
+            return "MAPS", job
+
+        elif action in ["replace", "delete", "insert_before", "insert_after"]:
+            if target_id is not None and target_id in id_map:
+                t_start, t_end = id_map[target_id]
+                
+                edit = {"start_byte": t_start, "end_byte": t_end, "new_code": code}
+                
+                if action == "delete":
+                    edit["new_code"] = ""
+                elif action == "insert_before":
+                    edit["end_byte"] = t_start
+                elif action == "insert_after":
+                    edit["start_byte"] = t_end
+                
+                job.fixed_code["edits"].append(edit)
+                return "MAPS", job
+            else:
+                job.llm_feedback = f"Invalid target_id for {action}: {target_id}"
+                return "MAPS", job
+
+        elif action == "done":
+            return "SYNTAX_GATE", job
+
+        return "ROUTER", job
 
 
 class SYNTAX_GATE(State):
@@ -541,7 +578,7 @@ class SYNTAX_GATE(State):
     def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
         logger.info("Validating syntax of proposed repair...")
         
-        if not job.fixed_code:
+        if not job.fixed_code or not job.fixed_code.get("edits"):
             return "ACTUATE", job
 
         sensor = TreeSitterSensor(self.profile.get_language_ptr())
@@ -549,15 +586,17 @@ class SYNTAX_GATE(State):
         with open(job.fixed_code["filepath"], "rb") as f:
             source = f.read()
 
-        edit = job.fixed_code["edits"][0]
-        new_code = edit["new_code"].replace("\r\n", "\n")
+        # Normalize line endings in all edits
+        edits = []
+        for edit in job.fixed_code["edits"]:
+            edits.append({
+                "start_byte": edit["start_byte"],
+                "end_byte": edit["end_byte"],
+                "new_code": edit["new_code"].replace("\r\n", "\n")
+            })
         
-        # Syntax check the entire file with the surgical repair applied
-        is_valid, error = sensor.validate_repair(source, [{
-            "start_byte": edit["start_byte"],
-            "end_byte": edit["end_byte"],
-            "new_code": new_code
-        }])
+        # Syntax check the entire file with all surgical repairs applied
+        is_valid, error = sensor.validate_repair(source, edits)
 
         if not is_valid:
             logger.error(f"Syntax validation failed: {error}")
@@ -590,6 +629,9 @@ class ACTUATE(State):
             # Successfully edited one symbol. Move to the next.
             job.maps_state["current_step_index"] += 1
             job.fixed_code = None # Clear current edit
+            # Clear navigation state for the next symbol
+            if "navigation_stack" in job.maps_state:
+                del job.maps_state["navigation_stack"]
             return "SENSE", job
         else:
             logger.error(f"Actuation failed: {result}")

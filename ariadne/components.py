@@ -77,6 +77,43 @@ class TreeSitterSensor:
                 })
         return results
 
+    def render_node_children(self, source: bytes, start_byte: int, end_byte: int) -> Tuple[str, Dict[int, Tuple[int, int]]]:
+        """
+        Parses a specific byte range and returns a rendered view of its immediate named children
+        with temporary IDs, plus a mapping of those IDs to absolute (start, end) bytes.
+        """
+        # We parse the full source but focus on the node at the given range
+        tree = self.parser.parse(source)
+        
+        # Find the smallest node that covers the requested range
+        node = tree.root_node.descendant_for_byte_range(start_byte, end_byte)
+        
+        # If the descendant is the same as requested, or we want its children:
+        view_lines = []
+        id_map = {}
+        
+        # Header for the view
+        view_lines.append(f"Current Node: {node.type} [{node.start_byte}-{node.end_byte}]")
+        
+        child_idx = 0
+        for child in node.children:
+            if not child.is_named:
+                continue
+                
+            # Get a snippet of the child's code for the view (first line or truncated)
+            child_code = child.text.decode("utf-8", errors="replace").split("\n")[0]
+            if len(child_code) > 80:
+                child_code = child_code[:77] + "..."
+            
+            view_lines.append(f"[{child_idx}] {child.type}: \"{child_code}\"")
+            id_map[child_idx] = (child.start_byte, child.end_byte)
+            child_idx += 1
+            
+        if not id_map:
+            view_lines.append(" (No named children)")
+            
+        return "\n".join(view_lines), id_map
+
     def validate_repair(self, source: bytes, edits: List[Dict[str, Any]]) -> Tuple[bool, Optional[str]]:
         """
         Checks if the proposed edits result in valid syntax.
