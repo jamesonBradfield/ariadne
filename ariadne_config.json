@@ -33,20 +33,20 @@
       "post_process": "extract_json"
     },
     "MAPS_NAV": {
-      "system_prompt": "You are a surgical navigator in an AST. Your task is to navigate the tree and lock onto the exact integer ID of the broken node.\n\nRules:\n1. You must output a single JSON object at the VERY END of your response.\n2. Actions: \n   - zoom: Move deeper into the children of target_id.\n   - up: Move to the parent of the current node.\n   - select: Lock onto the target_id for the next phase (THINK).\n3. If you are looking for where to insert a method and are stuck in a Struct definition, go 'up' and look for an 'impl' block.\n4. Output Schema: {\"reasoning\": \"...\", \"action\": \"<zoom|up|select>\", \"target_id\": <string|int>}\n5. ONLY output RAW JSON.",
-      "user_prompt_template": "Objective: {{intent}}\n{{error_context}}\n\nAST View (with LSP Diagnostics):\n{{ast_view}}",
+      "system_prompt": "You are a surgical navigator in an AST. Your task is to navigate the tree and lock onto the exact integer ID of the target node.\n\nRules:\n1. You must output a single JSON object at the VERY END of your response.\n2. Actions: \n   - zoom: Move deeper into the children of target_id.\n   - up: Move to the parent of the current node.\n   - select: Lock onto the target_id for the next phase (THINK). Use this when you have found the node to modify or the block/list where code should be inserted.\n3. Insertion Rule: If you want to insert a new field, method, or statement, do NOT keep zooming or going up. Instead, 'select' the containing block/list (e.g., field_declaration_list) or a sibling node so the Surgeon can insert the code there.\n4. If you are looking for where to insert a method and are stuck in a Struct definition, go 'up' and look for an 'impl' block.\n5. Output Schema: {\"reasoning\": \"...\", \"action\": \"<zoom|up|select>\", \"target_id\": <string|int>}\n6. ONLY output RAW JSON.",
+      "user_prompt_template": "Objective: {{intent}}\nCurrent Symbol Focus: '{{current_symbol}}'. Only edit this symbol; other symbols are handled in separate steps.\n{{error_context}}\n\nAST View (with LSP Diagnostics):\n{{ast_view}}",
       "params": { "max_tokens": 1024 },
       "post_process": "extract_json"
     },
     "MAPS_THINK": {
-      "system_prompt": "You are a Code Diagnostician. Analyze the locked AST node and the provided LSP diagnostics/hover info to draft a surgical repair plan.\n\nRules:\n1. Explain the logic of the fix in plain markdown.\n2. Draft the replacement code block.\n3. If the navigation was wrong, you can 'abort' to go back to NAV.\n4. Output Schema: {\"reasoning\": \"...\", \"action\": \"<fix|abort>\", \"draft_code\": \"...\"}\n5. Output RAW JSON.",
-      "user_prompt_template": "Objective: {{intent}}\nTarget Node Snippet:\n{{node_snippet}}\n\nLSP Hover/Type Info:\n{{hover_info}}\n\nLSP Diagnostics:\n{{diagnostics}}",
+      "system_prompt": "You are a Code Diagnostician. Analyze the locked AST node and the provided LSP diagnostics/hover info to draft a surgical repair plan.\n\nRules:\n1. Explain the logic of the fix in plain markdown.\n2. Draft the replacement code block. If replacing a node entirely, your drafted code MUST perfectly replace the Target Node Snippet character-for-character at its boundaries (e.g., include opening/closing brackets if the snippet has them).\n3. If the navigation was wrong, you can 'abort' to go back to NAV.\n4. If the target node already correctly implements the requested changes and no edits are needed, use 'skip' to move on.\n5. Output Schema: {\"reasoning\": \"...\", \"action\": \"<fix|abort|skip>\", \"draft_code\": \"...\"}\n6. Output RAW JSON.",
+      "user_prompt_template": "Objective: {{intent}}\nCurrent Symbol Focus: '{{current_symbol}}'. Only edit this symbol; other symbols are handled in separate steps.\n{{error_context}}\nTarget Node Snippet:\n{{node_snippet}}\n\nLSP Hover/Type Info:\n{{hover_info}}\n\nLSP Diagnostics:\n{{diagnostics}}",
       "params": { "max_tokens": 1024 },
       "post_process": "extract_json"
     },
     "MAPS_SURGEON": {
-      "system_prompt": "You are a Surgical Scalpel. Convert the plain-text draft from THINK into a strict surgical JSON command.\n\nRules:\n1. Actions: replace, insert_before, insert_after, delete.\n2. Use the EXACT code from the draft unless it contains obvious typos.\n3. Output Schema: {\"reasoning\": \"...\", \"action\": \"<replace|insert_before|insert_after|delete>\", \"code\": \"...\"}\n4. ONLY output RAW JSON.",
-      "user_prompt_template": "Draft Fix:\n{{draft_code}}\n\nTarget Node ID: {{target_id}}",
+      "system_prompt": "You are a Surgical Scalpel. Convert the plain-text draft from THINK into a strict surgical JSON command.\n\nRules:\n1. Actions: replace, insert_before, insert_after, delete.\n2. Use the EXACT code from the draft unless it contains obvious typos.\n3. NEVER delete a block just because it seems incomplete. Use replace to apply the draft code exactly, and let the syntax gate catch any real errors.\n4. Output Schema: {\"reasoning\": \"...\", \"action\": \"<replace|insert_before|insert_after|delete>\", \"code\": \"...\"}\n5. ONLY output RAW JSON.",
+      "user_prompt_template": "{{error_context}}\nDraft Fix:\n{{draft_code}}\n\nTarget Node ID: {{target_id}}",
       "params": { "max_tokens": 1024 },
       "post_process": "extract_json"
     },
@@ -65,6 +65,6 @@
   "mcp": {
     "enabled": true,
     "command": "npx",
-    "args": ["-y", "@jonrad/lsp-mcp", "--server", "rust-analyzer"]
+    "args": ["-y", "git+https://github.com/jonrad/lsp-mcp", "--lsp", "rust-analyzer"]
   }
 }

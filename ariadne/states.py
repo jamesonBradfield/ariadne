@@ -553,10 +553,15 @@ class MAPS_NAV(State):
         model_info = self.config_manager.get_model_info("MAPS_NAV")
         state_config = self.config_manager.config["states"]["MAPS_NAV"]
 
+        idx = job.maps_state.get("current_step_index", 0)
+        steps = job.maps_state.get("steps", [])
+        current_symbol = steps[idx]["symbol"] if idx < len(steps) else "Unknown"
+
         user_prompt = self.config_manager.render_prompt(
             state_config["user_prompt_template"],
             {
                 "intent": job.intent,
+                "current_symbol": current_symbol,
                 "error_context": getattr(job, "llm_feedback", "") or "",
                 "ast_view": ast_view
             }
@@ -571,6 +576,7 @@ class MAPS_NAV(State):
         })
 
         if status != "SUCCESS":
+            job.llm_feedback = f"Failed to parse your response as JSON. Ensure you only output valid JSON with properly escaped quotes: {result}"
             return "ROUTER", job
 
         action = result.get("action")
@@ -644,10 +650,20 @@ class MAPS_THINK(State):
         model_info = self.config_manager.get_model_info("MAPS_THINK")
         state_config = self.config_manager.config["states"]["MAPS_THINK"]
 
+        error_context = ""
+        if getattr(job, "llm_feedback", None):
+            error_context = f"PREVIOUS ATTEMPT FAILED:\n{job.llm_feedback}\n"
+
+        idx = job.maps_state.get("current_step_index", 0)
+        steps = job.maps_state.get("steps", [])
+        current_symbol = steps[idx]["symbol"] if idx < len(steps) else "Unknown"
+
         user_prompt = self.config_manager.render_prompt(
             state_config["user_prompt_template"],
             {
                 "intent": job.intent,
+                "current_symbol": current_symbol,
+                "error_context": error_context,
                 "node_snippet": node_snippet,
                 "hover_info": hover_info,
                 "diagnostics": diagnostics
@@ -662,7 +678,17 @@ class MAPS_THINK(State):
             "post_process": state_config.get("post_process")
         })
 
-        if status != "SUCCESS": return "ROUTER", job
+        if status != "SUCCESS":
+            job.llm_feedback = f"Failed to parse JSON. Raw output: {result}"
+            return "ROUTER", job
+
+        if result.get("action") == "skip":
+            logger.info("MAPS_THINK chose to skip. No changes needed for this symbol.")
+            job.maps_state["current_step_index"] += 1
+            job.fixed_code = None
+            if "navigation_stack" in job.maps_state:
+                del job.maps_state["navigation_stack"]
+            return "SENSE", job
 
         if result.get("action") == "abort":
             return "MAPS_NAV", job
@@ -684,9 +710,14 @@ class MAPS_SURGEON(State):
         model_info = self.config_manager.get_model_info("MAPS_SURGEON")
         state_config = self.config_manager.config["states"]["MAPS_SURGEON"]
 
+        error_context = ""
+        if getattr(job, "llm_feedback", None):
+            error_context = f"PREVIOUS ATTEMPT FAILED:\n{job.llm_feedback}\n"
+
         user_prompt = self.config_manager.render_prompt(
             state_config["user_prompt_template"],
             {
+                "error_context": error_context,
                 "draft_code": job.maps_state["draft_code"],
                 "target_id": job.maps_state["locked_node_id"]
             }
@@ -700,7 +731,9 @@ class MAPS_SURGEON(State):
             "post_process": state_config.get("post_process")
         })
 
-        if status != "SUCCESS": return "ROUTER", job
+        if status != "SUCCESS":
+            job.llm_feedback = f"Failed to parse JSON. Raw output: {result}"
+            return "ROUTER", job
 
         action = result.get("action")
         code = result.get("code", "")
@@ -776,7 +809,9 @@ class SYNTAX_GATE(State):
         if not is_valid:
             logger.error(f"Syntax validation failed: {error}")
             job.llm_feedback = f"The proposed repair introduced a syntax error: {error}. Please ensure the code is complete and follows the language grammar."
-            return "ROUTER", job
+            if job.fixed_code and job.fixed_code.get("edits"):
+                job.fixed_code["edits"].pop()
+            return "MAPS_THINK", job
 
         logger.info("Syntax validation passed.")
         job.llm_feedback = None
