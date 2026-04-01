@@ -71,4 +71,20 @@ This session evolved Ariadne into a **headless-capable, MCP-augmented framework*
 4.  **Rust Project Support**:
     *   Upgraded `scripts/run_rust_tests.py` to use `cargo test` within the target project directory, correctly resolving Godot-Rust crate dependencies.
 
-**Next Steps**: Pipeline raw HTML through a Markdown converter (like `mcp-stripfeed`) to optimize token usage in the `DOCS` state.
+### **3-Phase Ghost AST Pipeline & LSP Integration**
+This session overhauled the `MAPS` state into a deterministic surgical pipeline using `jonrad/lsp-mcp` for ambient diagnostics.
+
+1.  **3-Phase Surgical Loop**:
+    *   `MAPS_NAV`: Pure AST navigation (zoom/up) to lock onto a specific node ID.
+    *   `MAPS_THINK`: Diagnosis phase using plain-text markdown to draft fixes with LSP hover/type data.
+    *   `MAPS_SURGEON`: Final data entry phase to format the draft into a strict JSON edit.
+2.  **LSP Integration (`lsp-mcp`)**:
+    *   Implemented `LSPManager` to maintain a persistent connection to `rust-analyzer`.
+    *   Added **Shadow Buffer Validation**: Edits are now validated in an in-memory virtual buffer against live LSP diagnostics *before* being written to disk.
+    *   Implemented `find_project_root` to ensure the LSP server starts in the correct target directory (e.g., `TexelSplatting`).
+3.  **Environment & Logic Fixes**:
+    *   Switched toolchain to GNU to enable `rust-analyzer` support on Windows.
+    *   Added explicit feedback in `MAPS_NAV` to prevent self-zooming loops.
+    *   Removed the redundant `DOCS` state; real-time LSP hover data is now the primary documentation source.
+
+**Next Steps**: Refine the Architect's (`THINKING`) ability to distinguish between `struct` and `impl` blocks in Rust to avoid structural navigation deadlocks.

@@ -10,6 +10,7 @@ from typing import Any, Tuple, Dict, List, Optional
 from .core import State
 from .payloads import JobPayload
 from .primitives import ExtractAST, QueryLLM, ExecuteCommand, PromptUser, WriteFile, ASTSplice, BlockSplice, QueryMCP
+from .lsp import LSPManager
 from .components import TreeSitterSensor
 
 logger = logging.getLogger("ariadne.states")
@@ -484,15 +485,41 @@ class SENSE(State):
 
         # Store ONLY the current target node
         job.extracted_nodes = found_nodes 
-        return "MAPS", job
+        return "MAPS_NAV", job
 
 
-class MAPS(State):
+def find_project_root(target_files: List[str]) -> Optional[str]:
+    """Heuristic to find the project root (where Cargo.toml or similar lives)."""
+    if not target_files: return None
+    
+    # Check first target file
+    current = os.path.dirname(os.path.abspath(target_files[0]))
+    while current != os.path.dirname(current):
+        if os.path.exists(os.path.join(current, "Cargo.toml")) or \
+           os.path.exists(os.path.join(current, "package.json")):
+            return current
+        current = os.path.dirname(current)
+    return None
+
+_lsp_manager = None
+
+def get_lsp_manager(config_manager, job: Optional[JobPayload] = None):
+    global _lsp_manager
+    if _lsp_manager is None:
+        mcp_cfg = config_manager.config.get("mcp", {})
+        if mcp_cfg.get("enabled", False):
+            cwd = None
+            if job and job.target_files:
+                cwd = find_project_root(job.target_files)
+            _lsp_manager = LSPManager(mcp_cfg.get("command"), mcp_cfg.get("args", []), cwd=cwd)
+    return _lsp_manager
+
+class MAPS_NAV(State):
     """
-    Surgeon state. Implements the recursive AST Drill-Down Protocol.
+    1st Phase: Pure navigation. Locks onto the exact node ID.
     """
     def __init__(self, config_manager, profile):
-        super().__init__("MAPS")
+        super().__init__("MAPS_NAV")
         self.config_manager = config_manager
         self.profile = profile
 
@@ -501,37 +528,36 @@ class MAPS(State):
             return "SENSE", job
 
         target_node = job.extracted_nodes[0]
+        filepath = target_node["filepath"]
         
         # Initialize navigation state if not present
         if "navigation_stack" not in job.maps_state:
             job.maps_state["navigation_stack"] = [(target_node["start_byte"], target_node["end_byte"])]
-            job.fixed_code = {
-                "filepath": target_node["filepath"],
-                "edits": []
-            }
+            job.fixed_code = {"filepath": filepath, "edits": []}
         
-        # Get current focus from stack
         start_byte, end_byte = job.maps_state["navigation_stack"][-1]
         
-        # Render the current view
+        # Render AST View
         sensor = TreeSitterSensor(self.profile.get_language_ptr())
-        with open(target_node["filepath"], "rb") as f:
+        with open(filepath, "rb") as f:
             source = f.read()
-        
         ast_view, id_map = sensor.render_node_children(source, start_byte, end_byte)
         
-        model_info = self.config_manager.get_model_info("MAPS")
-        state_config = self.config_manager.config["states"]["MAPS"]
+        # Inject LSP Diagnostics if available
+        lsp = get_lsp_manager(self.config_manager)
+        if lsp:
+            diagnostics = lsp.get_diagnostics(filepath)
+            if diagnostics:
+                ast_view += "\n\nLSP DIAGNOSTICS FOR THIS FILE:\n" + json.dumps(diagnostics, indent=2)
 
-        error_context = ""
-        if hasattr(job, "llm_feedback") and job.llm_feedback:
-            error_context = f"PREVIOUS ATTEMPT FAILED SYNTAX CHECK:\n{job.llm_feedback}\n"
+        model_info = self.config_manager.get_model_info("MAPS_NAV")
+        state_config = self.config_manager.config["states"]["MAPS_NAV"]
 
         user_prompt = self.config_manager.render_prompt(
             state_config["user_prompt_template"],
             {
                 "intent": job.intent,
-                "error_context": error_context,
+                "error_context": getattr(job, "llm_feedback", "") or "",
                 "ast_view": ast_view
             }
         )
@@ -545,57 +571,175 @@ class MAPS(State):
         })
 
         if status != "SUCCESS":
-            job.llm_feedback = f"Failed to get navigation action: {result}"
             return "ROUTER", job
 
         action = result.get("action")
         target_id = result.get("target_id")
-        code = result.get("code", "")
         
-        logger.info(f"MAPS Action: {action} on ID {target_id}")
-
         if action == "zoom":
             if target_id is not None and str(target_id) in id_map:
                 new_range = id_map[str(target_id)]
                 if new_range == (start_byte, end_byte):
-                    job.llm_feedback = f"You are already focused on {target_id}. Did you mean to zoom into a child ID instead?"
-                    return "MAPS", job
+                    job.llm_feedback = f"You are already focused on node '{target_id}'. To move deeper, zoom into a child ID (0, 1, 2, etc.)."
+                    return "MAPS_NAV", job
                 job.maps_state["navigation_stack"].append(new_range)
-                return "MAPS", job
+                job.llm_feedback = None # Clear feedback on success
+                return "MAPS_NAV", job
             else:
                 job.llm_feedback = f"Invalid target_id for zoom: {target_id}. Available IDs: {list(id_map.keys())}"
-                return "MAPS", job
-
+                return "MAPS_NAV", job
+        
         elif action == "up":
             if len(job.maps_state["navigation_stack"]) > 1:
                 job.maps_state["navigation_stack"].pop()
+                job.llm_feedback = None
+                return "MAPS_NAV", job
             else:
-                job.llm_feedback = "You are already at the top of the current symbol's AST view. You cannot go higher. If you need to add a method, use 'insert_after' or 'insert_before' on a child of the current node, or finalize this symbol and request a different one."
-            return "MAPS", job
-
-        elif action in ["replace", "delete", "insert_before", "insert_after"]:
+                job.llm_feedback = "You are already at the top of the current symbol's AST view. You cannot go higher. If you need to edit a different part of the file, use 'select' on a visible node or 'abort' in the THINK phase."
+                return "MAPS_NAV", job
+        
+        elif action == "select":
             if target_id is not None and str(target_id) in id_map:
-                t_start, t_end = id_map[str(target_id)]
-                
-                edit = {"start_byte": t_start, "end_byte": t_end, "new_code": code}
-                
-                if action == "delete":
-                    edit["new_code"] = ""
-                elif action == "insert_before":
-                    edit["end_byte"] = t_start
-                elif action == "insert_after":
-                    edit["start_byte"] = t_end
-                
-                job.fixed_code["edits"].append(edit)
-                return "MAPS", job
+                job.maps_state["locked_node_id"] = str(target_id)
+                job.maps_state["locked_range"] = id_map[str(target_id)]
+                job.maps_state["id_map"] = id_map # Save for Surgeon
+                job.llm_feedback = None
+                return "MAPS_THINK", job
             else:
-                job.llm_feedback = f"Invalid target_id for {action}: {target_id}. Available IDs: {list(id_map.keys())}"
-                return "MAPS", job
+                job.llm_feedback = f"Invalid target_id for select: {target_id}. Available IDs: {list(id_map.keys())}"
+                return "MAPS_NAV", job
 
-        elif action == "done":
-            return "SYNTAX_GATE", job
+        job.llm_feedback = f"Unknown action or missing target_id: {result}"
+        return "MAPS_NAV", job
 
-        return "ROUTER", job
+
+class MAPS_THINK(State):
+    """
+    2nd Phase: Diagnosis and drafting. Plain-text markdown focus.
+    """
+    def __init__(self, config_manager, profile):
+        super().__init__("MAPS_THINK")
+        self.config_manager = config_manager
+        self.profile = profile
+
+    def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
+        filepath = job.fixed_code["filepath"]
+        start_byte, end_byte = job.maps_state["locked_range"]
+        
+        with open(filepath, "rb") as f:
+            source = f.read()
+        node_snippet = source[start_byte:end_byte].decode("utf-8", errors="replace")
+        
+        # In-memory diagnostics and hover info
+        lsp = get_lsp_manager(self.config_manager)
+        diagnostics = "No LSP data."
+        hover_info = "No hover data."
+        
+        if lsp:
+            diagnostics = json.dumps(lsp.get_diagnostics(filepath), indent=2)
+            # Find a good position for hover (start of node)
+            # This is a simplification; ideally we'd map byte to line/char
+            hover_info = lsp.get_hover(filepath, 0, 0) # Placeholder
+
+        model_info = self.config_manager.get_model_info("MAPS_THINK")
+        state_config = self.config_manager.config["states"]["MAPS_THINK"]
+
+        user_prompt = self.config_manager.render_prompt(
+            state_config["user_prompt_template"],
+            {
+                "intent": job.intent,
+                "node_snippet": node_snippet,
+                "hover_info": hover_info,
+                "diagnostics": diagnostics
+            }
+        )
+
+        query = QueryLLM(model=model_info.get("model"), api_base=model_info.get("api_base"))
+        status, result = query.tick({
+            "system": state_config["system_prompt"],
+            "user": user_prompt,
+            "params": model_info.get("params", {}),
+            "post_process": state_config.get("post_process")
+        })
+
+        if status != "SUCCESS": return "ROUTER", job
+
+        if result.get("action") == "abort":
+            return "MAPS_NAV", job
+        
+        job.maps_state["draft_code"] = result.get("draft_code", "")
+        return "MAPS_SURGEON", job
+
+
+class MAPS_SURGEON(State):
+    """
+    3rd Phase: Strict surgical formatting and Ghost Check validation.
+    """
+    def __init__(self, config_manager, profile):
+        super().__init__("MAPS_SURGEON")
+        self.config_manager = config_manager
+        self.profile = profile
+
+    def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
+        model_info = self.config_manager.get_model_info("MAPS_SURGEON")
+        state_config = self.config_manager.config["states"]["MAPS_SURGEON"]
+
+        user_prompt = self.config_manager.render_prompt(
+            state_config["user_prompt_template"],
+            {
+                "draft_code": job.maps_state["draft_code"],
+                "target_id": job.maps_state["locked_node_id"]
+            }
+        )
+
+        query = QueryLLM(model=model_info.get("model"), api_base=model_info.get("api_base"))
+        status, result = query.tick({
+            "system": state_config["system_prompt"],
+            "user": user_prompt,
+            "params": model_info.get("params", {}),
+            "post_process": state_config.get("post_process")
+        })
+
+        if status != "SUCCESS": return "ROUTER", job
+
+        action = result.get("action")
+        code = result.get("code", "")
+        target_id = job.maps_state["locked_node_id"]
+        id_map = job.maps_state["id_map"]
+        
+        t_start, t_end = id_map[target_id]
+        edit = {"start_byte": t_start, "end_byte": t_end, "new_code": code}
+        
+        if action == "delete": edit["new_code"] = ""
+        elif action == "insert_before": edit["end_byte"] = t_start
+        elif action == "insert_after": edit["start_byte"] = t_end
+
+        # GHOST CHECK
+        lsp = get_lsp_manager(self.config_manager)
+        if lsp:
+            filepath = job.fixed_code["filepath"]
+            with open(filepath, "rb") as f:
+                original_source = f.read()
+            
+            # Apply edit to shadow buffer
+            temp_source = bytearray(original_source)
+            temp_source[edit["start_byte"]:edit["end_byte"]] = edit["new_code"].encode("utf-8")
+            shadow_content = temp_source.decode("utf-8", errors="replace")
+            
+            # Notify LSP
+            old_diags = len(lsp.get_diagnostics(filepath))
+            lsp.did_change(filepath, shadow_content)
+            new_diags = len(lsp.get_diagnostics(filepath))
+            
+            logger.info(f"Ghost Check: Diagnostics {old_diags} -> {new_diags}")
+            
+            if new_diags > old_diags:
+                logger.warning("Ghost Check failed: Diagnostics increased! Aborting edit.")
+                job.llm_feedback = "Your edit introduced NEW compiler errors. Re-evaluating."
+                return "MAPS_THINK", job
+
+        job.fixed_code["edits"].append(edit)
+        return "SYNTAX_GATE", job
 
 
 class SYNTAX_GATE(State):
@@ -680,77 +824,3 @@ class POST_MORTEM(State):
     def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
         logger.info("Repair session complete. summarized results.")
         return "FINISH", job
-
-
-class DOCS(State):
-    """
-    Retrieves and compresses documentation context using MCP or local search.
-    """
-    def __init__(self, config_manager):
-        super().__init__("DOCS")
-        self.config_manager = config_manager
-
-    def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
-        logger.info("Retrieving documentation context...")
-
-        model_info = self.config_manager.get_model_info("DOCS")
-        state_config = self.config_manager.config["states"]["DOCS"]
-        
-        # 1. Determine documentation source
-        # For Rust projects, we assume cargo doc has been run or we run it
-        # In this session, it was already run.
-        
-        mcp_cfg = self.config_manager.config.get("mcp", {})
-        if mcp_cfg.get("enabled", False):
-            logger.info("Using MCP to retrieve docs...")
-            query_mcp = QueryMCP()
-            status, result = query_mcp.tick({
-                "command": mcp_cfg.get("command"),
-                "args": mcp_cfg.get("args", []),
-                "tool_name": state_config.get("mcp_tool", "read_file"),
-                "tool_args": {
-                    "path": state_config.get("doc_index", "target/doc/index.html")
-                }
-            })
-            if status == "SUCCESS":
-                raw_docs = str(result)
-            else:
-                logger.warning(f"MCP failed to retrieve docs: {result}. Falling back to direct read.")
-                raw_docs = "Failed to retrieve docs via MCP."
-        else:
-            # Fallback: direct read of index.html if it exists
-            doc_path = state_config.get("doc_index", "target/doc/index.html")
-            if os.path.exists(doc_path):
-                try:
-                    with open(doc_path, 'r', encoding='utf-8') as f:
-                        raw_docs = f.read()
-                except Exception as e:
-                    raw_docs = f"Error reading docs: {e}"
-            else:
-                raw_docs = "No documentation found at " + doc_path
-
-        # 2. Agentic Filter/Compression
-        logger.info("Compressing documentation context...")
-        
-        user_prompt = self.config_manager.render_prompt(
-            state_config["user_prompt_template"],
-            {
-                "intent": job.intent,
-                "raw_docs": raw_docs[:3000] # Limit input to LLM to avoid context overflow
-            }
-        )
-
-        query = QueryLLM(model=model_info.get("model"), api_base=model_info.get("api_base"))
-        status, compressed_docs = query.tick({
-            "system": state_config["system_prompt"],
-            "user": user_prompt,
-            "params": model_info.get("params", {}),
-            "post_process": state_config.get("post_process")
-        })
-
-        if status == "SUCCESS":
-            job.docs = compressed_docs
-        else:
-            job.docs = "Failed to compress docs."
-
-        return "THINKING", job

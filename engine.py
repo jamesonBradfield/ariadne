@@ -9,8 +9,8 @@ from ariadne.core import EngineContext, State
 from ariadne.payloads import JobPayload
 from ariadne.states import (
     TRIAGE, DISPATCH, EVALUATE, THINKING, ROUTER, 
-    SEARCH, SENSE, MAPS, SYNTAX_GATE, ACTUATE, 
-    POST_MORTEM, INTERVENE, DOCS
+    SEARCH, SENSE, MAPS_NAV, MAPS_THINK, MAPS_SURGEON, SYNTAX_GATE, ACTUATE, 
+    POST_MORTEM, INTERVENE
 )
 from ariadne.tui import AriadneApp, StateTransitionMessage
 
@@ -278,12 +278,13 @@ def main():
             "SEARCH": SEARCH(config_manager, profile),
 
             "SENSE": SENSE(profile),
-            "MAPS": MAPS(config_manager, profile),
+            "MAPS_NAV": MAPS_NAV(config_manager, profile),
+            "MAPS_THINK": MAPS_THINK(config_manager, profile),
+            "MAPS_SURGEON": MAPS_SURGEON(config_manager, profile),
             "SYNTAX_GATE": SYNTAX_GATE(profile),
             "ACTUATE": ACTUATE(),
             "POST_MORTEM": POST_MORTEM(config_manager),
             "INTERVENE": INTERVENE(config_manager),
-            "DOCS": DOCS(config_manager),
         }
 
     states_registry = create_states(target_files)
