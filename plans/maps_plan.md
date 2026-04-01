@@ -1,33 +1,43 @@
 # Objective
-Replace the `CODING` state with a new `MAPS` state (Micro AST Procedural Surgeon) that implements the "AST Drill-Down Protocol".
+Upgrade the `MAPS` (Micro AST Procedural Surgeon) state into a 3-phase **Deterministic Ghost AST Pipeline** utilizing `jonrad/lsp-mcp` for ambient diagnostics and shadow-buffer validation.
 
 # Background & Motivation
-The `CODING` state currently asks the LLM to rewrite an entire extracted AST node (e.g., a full function). This can be slow and error-prone for large functions because the LLM must generate the entire function body. The `MAPS` state allows the LLM to navigate the AST of the extracted node step-by-step and make precise byte-level edits (zoom, replace, insert_before, insert_after, delete) to specific sub-nodes, saving tokens and eliminating hallucination risk in untouched code.
+Local 8B models suffer from attention drift and overconfidence when forced to navigate an AST, reason about compiler errors, and format strict JSON edits simultaneously. Furthermore, relying on standard `cargo test` execution for feedback creates a slow, delayed "Fail-Fast" loop that causes the model to lose context. 
 
-# Scope & Impact
-*   **`ariadne/states.py`**: Add `MAPS(State)` and remove `CODING(State)`. Change `SENSE` transition from `CODING` to `MAPS`. Change `MAPS` to transition to `SYNTAX_GATE` when finished.
-*   **`ariadne_config.json`**: Add `MAPS` prompt configuration. Remove `CODING`.
-*   **`engine.py`**: Replace `CODING` with `MAPS` in `states_registry`.
+By splitting the surgical process into strict Single Responsibility states (NAV, THINK, SURGEON) and validating edits in an in-memory shadow buffer against a live Language Server *before* writing to disk, we eliminate "Ghost AST" desyncs and force the LLM to achieve mathematical correctness deterministically.
+
+# Architecture Overview: The Ghost AST Pipeline
+
+### Layer 1: The Ambient Environment (`lsp-mcp`)
+Ariadne integrates `jonrad/lsp-mcp` to run continuously. The Python engine intercepts state transitions to invisibly paint the LLM's prompt with real-time `workspace/diagnostics` and `textDocument/hover` data. The LLM does not explicitly "call" tools; it operates in an LSP-aware environment.
+
+### Layer 2: The 3-Phase Surgical Loop (Strict SRP)
+* **1. MAPS_NAV (The Bloodhound):** * *Input:* Text-based AST view annotated with live LSP diagnostics.
+    * *Role:* Pure navigation. Uses `zoom` and `up`.
+    * *Exit:* Locks onto the exact integer ID of the broken node (`{"action": "select", "target_id": X}`).
+* **2. MAPS_THINK (The Diagnostician):**
+    * *Input:* The locked node, the error, and the injected LSP type signature (`textDocument/hover`).
+    * *Role:* Sanity check on NAV and logic drafting.
+    * *Exit:* Writes a plain-text markdown explanation and drafts the code fix. No strict JSON pressure. Can `abort` to kick back to NAV.
+* **3. MAPS_SURGEON (The Scalpel):**
+    * *Input:* The locked node and THINK's plain-text drafted fix.
+    * *Role:* Data entry. Formats the draft into a strict `replace`, `insert_before`, `insert_after`, or `delete` JSON command.
+
+### Layer 3: The Deterministic Ghost Check (Zero-Guessing)
+Before writing to disk, the Python engine intercepts the Surgeon's JSON edit:
+1.  **Shadow Edit:** Engine applies the edit to an in-memory virtual buffer and sends a `textDocument/didChange` notification to `lsp-mcp`.
+2.  **The Math:** Engine queries `workspace/diagnostics` for the new diagnostic count.
+3.  **The Route:** * *Errors hit 0:* Flawless victory. Commit to disk.
+    * *Errors remain but change message:* Edit rejected. New error is fed directly back to `MAPS_THINK`.
+    * *Errors multiply (Cascading failure):* Edit instantly aborted. Shadow buffer reverted. Surgeon is forced to try a new approach.
 
 # Implementation Steps
-1.  **Define `MAPS` in `ariadne/states.py`**:
-    *   Initialize tracking state in `job` (e.g., `job.maps_state` dict) to track the current symbol index and node navigation history (stack of `(start_byte, end_byte)`).
-    *   Re-parse the target file. Find the AST node matching the current navigation state (starting at the `extracted_node` boundary from `SENSE`).
-    *   Render the node's named children with integer IDs (`[0] type: snippet...`).
-    *   Query the LLM with the intent, error feedback, and the rendered node view.
-    *   The LLM must output a JSON action: `{"action": "zoom", "target": <id>}`, `{"action": "replace", "target": <id>, "code": "..."}`, `{"action": "up"}`, or `{"action": "done"}`.
-    *   If `zoom`, push the target's `(start_byte, end_byte)` to the history stack and return `("MAPS", job)`.
-    *   If `up`, pop the history stack and return `("MAPS", job)`.
-    *   If an edit (`replace`, `insert_before`, `insert_after`, `delete`), append to `job.fixed_code["edits"]` (using the target node's byte offsets) and return `("MAPS", job)` so it can continue editing if needed.
-    *   If `done`, move to the next extracted symbol. If all symbols are done, return `("SYNTAX_GATE", job)`.
-
-2.  **Update `ariadne_config.json`**:
-    *   Create `MAPS` system and user prompts.
-    *   System Prompt: "You are the Micro AST Procedural Surgeon (MAPS). Navigate the AST to apply surgical edits. Valid actions: 'zoom', 'up', 'replace', 'insert_before', 'insert_after', 'delete', 'done'. Output a SINGLE JSON object: {\"reasoning\": \"...\", \"action\": \"...\", \"target\": 0, \"code\": \"...\"}"
-
-3.  **Update `engine.py`**:
-    *   Replace `CODING` with `MAPS`.
-
-# Verification & Testing
-1.  Run the engine on `test_contract.rs`.
-2.  Observe the LLM looping through `MAPS`, zooming into the `take_damage` block, and performing a `replace` or `insert_after` to add `self.is_dead = true;`.
+1.  **Engine Integration (`ariadne/primitives.py` & `states.py`)**:
+    * Implement an LSP-MCP wrapper capable of maintaining a shadow buffer (`textDocument/didChange`) and querying `workspace/diagnostics`.
+2.  **State Refactoring (`ariadne/states.py`)**:
+    * Remove monolithic `MAPS` state.
+    * Implement `MAPS_NAV`, `MAPS_THINK`, and `MAPS_SURGEON` classes.
+    * Implement the Ghost Check logic inside `MAPS_SURGEON`'s tick method to handle the LSP diffing math.
+3.  **Config Updates (`ariadne_config.json`)**:
+    * Write specific, isolated system/user prompts for `MAPS_NAV`, `MAPS_THINK`, and `MAPS_SURGEON`.
+    * Remove JSON escaping requirements from the `THINK` prompt.
