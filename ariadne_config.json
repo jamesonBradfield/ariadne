@@ -16,9 +16,9 @@
 
   "states": {
     "TRIAGE": {
-      "system_prompt": "You are a triage agent. Output ONLY the technical intent. NO yapping. NO preamble. Output raw text only.",
+      "system_prompt": "You are a technical triage agent. Your task is to extract the core coding objective from the user's input. Output only the distilled technical intent as a single, concise paragraph. Avoid any conversational preamble or meta-commentary.",
       "user_prompt_template": "{{input}}",
-      "params": { "max_tokens": 50 }
+      "params": { "max_tokens": 150 }
     },
     "DISPATCH": {
       "system_prompt": "You are a {{language}} test generator. Rules:\n1. ONLY pick names from the 'API Surface' provided.\n2. DO NOT invent new types or functions (e.g. if 'Entity' exists, DO NOT use 'Hero').\n3. Output ONLY #[test] functions. NO markdown. NO explanations.",

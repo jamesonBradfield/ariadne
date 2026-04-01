@@ -3,13 +3,15 @@ import logging
 import os
 import json
 import threading
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from ariadne.core import EngineContext, State
 from ariadne.payloads import JobPayload
-from ariadne.primitives import QueryLLM, ASTSplice
-from ariadne.states import TRIAGE, DISPATCH, EVALUATE, THINKING, ROUTER, SEARCH, SENSE, MAPS, SYNTAX_GATE, ACTUATE, POST_MORTEM, INTERVENE
-from ariadne.components import TreeSitterSensor, SyntaxGate
+from ariadne.states import (
+    TRIAGE, DISPATCH, EVALUATE, THINKING, ROUTER, 
+    SEARCH, SENSE, MAPS, SYNTAX_GATE, ACTUATE, 
+    POST_MORTEM, INTERVENE
+)
 from ariadne.tui import AriadneApp, StateTransitionMessage
 
 # Setup logging
@@ -182,7 +184,7 @@ def run_engine_loop(context: EngineContext, states_registry: Dict[str, State], i
                 idx = getattr(payload, "maps_state", {}).get("current_target_index", 0)
                 if idx < len(payload.extracted_nodes):
                     node = payload.extracted_nodes[idx]
-                    # FIX: Add null check for payload.fixed_code
+                    # ROBUST FIX: Ensure payload.fixed_code exists and is NOT None
                     edits = []
                     if hasattr(payload, "fixed_code") and payload.fixed_code is not None:
                         edits = payload.fixed_code.get("edits", [])
@@ -303,7 +305,6 @@ def main():
 
     # 5. Launch UI or CLI Loop
     if args.tui:
-        from ariadne.tui import SetupScreen
         app = AriadneApp()
         
         def start_engine_callback(setup_data: Dict[str, Any]):
@@ -316,20 +317,22 @@ def main():
                 new_targets_list = [t.strip() for t in new_targets_raw.split(",") if t.strip()]
                 target_files = ProfileLoader.expand_targets(new_targets_list, profile)
             
-            # Re-build states and payload
+            # Re-build states
             states_registry = create_states(target_files)
             
-            if context.current_state == "TRIAGE":
+            # INTELLIGENT SKIP: If intent is already substantial, skip elaboration
+            start_state = "TRIAGE" if len(new_intent) > 15 else "INTERVENE"
+            context.transition(start_state)
+
+            if start_state == "TRIAGE":
                 payload = {"input": new_intent, "target_files": target_files}
-            elif context.current_state == "INTERVENE":
+            else:
                 payload = {
                     "intent": new_intent, 
                     "target_files": target_files, 
                     "needs_elaboration": True, 
                     "next_headless_state": "TRIAGE"
                 }
-            else:
-                payload = JobPayload(intent=new_intent, target_files=target_files)
 
             if "DISPATCH" in states_registry:
                 dispatch_state = states_registry["DISPATCH"]

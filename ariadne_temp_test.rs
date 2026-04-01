@@ -27,35 +27,28 @@ impl Entity {
 
 
 #[test]
-fn test_take_damage_with_armor() {
+fn test_take_damage_with_armor_mitigation() {
     let mut entity = Entity::new();
-    entity.take_damage(100.0);
-    assert_eq!(entity.health, 50.0);
-    assert!(!entity.is_dead);
+    let damage = 100.0;
+    let armor_value = 20.0;
+    let mitigation = entity.take_damage(damage, armor_value);
+    assert!(mitigation < damage);
 }
 
 #[test]
-fn test_take_damage_exceeds_health() {
+fn test_take_damage_transition_to_death() {
     let mut entity = Entity::new();
-    entity.take_damage(200.0);
-    assert_eq!(entity.health, 0.0);
-    assert!(entity.is_dead);
-}
-
-#[test]
-fn test_heal_after_death() {
-    let mut entity = Entity::new();
-    entity.take_damage(200.0);
-    entity.heal(50.0);
-    assert_eq!(entity.health, 0.0);
-    assert!(entity.is_dead);
+    let damage = 1000.0;
+    let armor_value = 0.0;
+    entity.take_damage(damage, armor_value);
+    assert!(entity.is_dead());
 }
 
 #[test]
 fn test_take_damage_no_armor() {
     let mut entity = Entity::new();
-    entity.armor = 0.0;
-    entity.take_damage(100.0);
-    assert_eq!(entity.health, 0.0);
-    assert!(entity.is_dead);
+    let damage = 50.0;
+    let armor_value = 0.0;
+    let mitigation = entity.take_damage(damage, armor_value);
+    assert_eq!(mitigation, damage);
 }

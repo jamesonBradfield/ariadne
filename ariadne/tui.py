@@ -8,13 +8,12 @@ from datetime import datetime
 from typing import Any, Dict, Optional, List, Callable
 
 from textual.app import App, ComposeResult
-from textual.containers import Container, Horizontal, Vertical, Grid, VerticalScroll
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.widgets import Header, Footer, Static, RichLog, TabbedContent, TabPane, Button, Input, Label
 from textual.reactive import reactive
 from textual.message import Message
-from textual.screen import ModalScreen, Screen
+from textual.screen import ModalScreen
 from textual.binding import Binding
-from textual.geometry import Offset
 
 class StateTransitionMessage(Message):
     """Sent when the engine transitions to a new state."""
@@ -196,6 +195,7 @@ class AriadneApp(App):
         self.initial_setup_data: Dict[str, str] = {"intent": "", "targets": ""}
         self.current_prompt_event: Optional[threading.Event] = None
         self.current_prompt_container: Optional[Dict[str, bool]] = None
+        self.log_buffer: List[str] = []
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -245,12 +245,15 @@ class AriadneApp(App):
             self.check_review_scroll()
         else:
             self.remove_class("review-active")
-            self.query_one("#runtime-status", Static).update("[bold white]Running[/]" if self.engine_running else "[bold white]Idle[/]")
+            self.query_one("#runtime-status", Static).update(
+                "[bold white]Running[/]" if self.engine_running else "[bold white]Idle[/]"
+            )
             self.bind("enter", "approve", show=False)
             self.bind("escape", "reject", show=False)
 
     def check_review_scroll(self) -> None:
-        if not self.prompt_active: return
+        if not self.prompt_active:
+            return
         scroll_view = self.query_one("#review-scroll", VerticalScroll)
         if scroll_view.scroll_offset.y + scroll_view.content_size.height >= scroll_view.virtual_size.height - 1:
             self.scrolled_to_bottom = True
@@ -280,7 +283,8 @@ class AriadneApp(App):
             self.query_one(TabbedContent).active = "logs-tab"
 
     def action_open_setup(self) -> None:
-        if self.engine_running or self.prompt_active: return
+        if self.engine_running or self.prompt_active:
+            return
         def handle_setup(setup_data: Optional[Dict[str, Any]]) -> None:
             if setup_data and self.start_callback:
                 self.engine_running = True
@@ -314,20 +318,33 @@ class AriadneApp(App):
         active = tabs.active
         if active == "logs-tab":
             log = self.query_one("#engine-logs", RichLog)
-            log.scroll_down() if direction > 0 else log.scroll_up()
+            if direction > 0:
+                log.scroll_down()
+            else:
+                log.scroll_up()
         elif active == "tests-tab":
             scroll = self.query_one("#test-scroll", VerticalScroll)
-            scroll.scroll_down() if direction > 0 else scroll.scroll_up()
+            if direction > 0:
+                scroll.scroll_down()
+            else:
+                scroll.scroll_up()
         elif active == "review-tab":
             scroll = self.query_one("#review-scroll", VerticalScroll)
-            scroll.scroll_down() if direction > 0 else scroll.scroll_up()
+            if direction > 0:
+                scroll.scroll_down()
+            else:
+                scroll.scroll_up()
             self.check_review_scroll()
         else:
             try:
                 pane = tabs.query_one(f"#{active}")
                 widget = pane.query_one(Static)
-                widget.scroll_down() if direction > 0 else widget.scroll_up()
-            except Exception: pass
+                if direction > 0:
+                    widget.scroll_down()
+                else:
+                    widget.scroll_up()
+            except Exception:
+                pass
 
     def action_yank(self) -> None:
         """Copies content of the active tab to clipboard."""
@@ -345,6 +362,9 @@ class AriadneApp(App):
         elif active == "plan-tab":
             text = str(self.query_one("#plan-display", Static).renderable)
             label = "Active Plan"
+        elif active == "logs-tab":
+            text = "\n".join(self.log_buffer)
+            label = "Engine Logs"
 
         if text:
             pyperclip.copy(text)
@@ -358,37 +378,47 @@ class AriadneApp(App):
         logging.getLogger("ariadne").addHandler(handler)
         redirector = RedirectOutput(self)
         sys.stdout = sys.stderr = redirector
-        if self.start_callback: self.action_open_setup()
+        if self.start_callback:
+            self.action_open_setup()
         
     def on_engine_log_message(self, message: EngineLogMessage) -> None:
         try:
             log = self.query_one("#engine-logs", RichLog)
             ts = datetime.fromtimestamp(message.record.created).strftime("%H:%M:%S")
-            log.write(f"[{ts}] [{message.record.levelname}] {message.record.getMessage()}")
-        except Exception: pass
+            line = f"[{ts}] [{message.record.levelname}] {message.record.getMessage()}"
+            log.write(line)
+            self.log_buffer.append(line)
+        except Exception:
+            pass
 
     def on_stdout_message(self, message: StdoutMessage) -> None:
         try:
             log = self.query_one("#engine-logs", RichLog)
-            log.write(f"[dim white]{message.text.strip()}[/]")
-        except Exception: pass
+            content = message.text.strip()
+            log.write(f"[dim white]{content}[/]")
+            self.log_buffer.append(content)
+        except Exception:
+            pass
 
     def on_state_transition_message(self, message: StateTransitionMessage) -> None:
         try:
             status = self.query_one("#engine-status", EngineStatus)
-            status.state_name, status.retry_count = message.state_name, message.retry_count
-            if message.state_name == "FINISH": self.engine_running = False
-        except Exception: pass
+            status.state_name = message.state_name
+            status.retry_count = message.retry_count
+            if message.state_name == "FINISH":
+                self.engine_running = False
+        except Exception:
+            pass
 
     def on_prompt_user_message(self, message: PromptUserMessage) -> None:
-        self.current_prompt_event, self.current_prompt_container = message.response_event, message.response_container
+        self.current_prompt_event = message.response_event
+        self.current_prompt_container = message.response_container
         self.query_one("#review-text", Static).update(message.proposal)
         self.scrolled_to_bottom = False
         self.prompt_active = True
 
     def on_editor_message(self, message: EditorMessage) -> None:
         """Handles external editor requests by suspending the TUI."""
-        # Visual direction before terminal takeover
         self.notify("Launching external editor...", title="Intervention Required", severity="information")
         self.query_one("#runtime-status", Static).update("[bold yellow]Editor Active[/]")
         
@@ -401,8 +431,10 @@ class AriadneApp(App):
                 message.completion_event.set()
         
     def update_intent(self, intent: str) -> None:
-        try: self.query_one("#intent-display", Static).update(f"\n[bold blue]ACTIVE INTENT[/]\n{intent}")
-        except Exception: pass
+        try:
+            self.query_one("#intent-display", Static).update(f"\n[bold blue]ACTIVE INTENT[/]\n{intent}")
+        except Exception:
+            pass
 
     def update_plan(self, data: Dict[str, Any]) -> None:
         try:
@@ -410,7 +442,8 @@ class AriadneApp(App):
             for i, s in enumerate(data.get("steps", [])):
                 text += f"{i+1}. [bold cyan]{s.get('symbol', 'unknown')}[/]\n"
             self.query_one("#plan-display", Static).update(text)
-        except Exception: pass
+        except Exception:
+            pass
 
     def update_surgeon(self, symbol: str, code: str, edits: List[Dict[str, Any]] = None) -> None:
         try:
@@ -418,20 +451,25 @@ class AriadneApp(App):
             if edits:
                 text += "\n[bold green]Queued Edits:[/]\n"
                 for i, e in enumerate(edits):
-                    text += f"{i+1}. [italic]{e.get('search_text', '')[:30]}...[/] -> [italic]{edit.get('replace_text', '')[:30]}...[/]\n"
+                    text += f"{i+1}. [italic]{e.get('search_text', '')[:30]}...[/] -> [italic]{e.get('replace_text', '')[:30]}...[/]\n"
             self.query_one("#surgeon-display", Static).update(text)
-        except Exception: pass
+        except Exception:
+            pass
 
     def update_history(self, history: List[str]) -> None:
         try:
             text = "[bold yellow]REPAIR HISTORY[/]\n"
-            for i, entry in enumerate(history): text += f"{i+1}. {entry}\n"
+            for i, entry in enumerate(history):
+                text += f"{i+1}. {entry}\n"
             self.query_one("#history-display", Static).update(text)
-        except Exception: pass
+        except Exception:
+            pass
 
     def write_test_output(self, output: str) -> None:
-        try: self.query_one("#test-output", Static).update(output)
-        except Exception: pass
+        try:
+            self.query_one("#test-output", Static).update(output)
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     AriadneApp().run()

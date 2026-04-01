@@ -1,12 +1,10 @@
-import re
-from typing import Any, Optional
-import tree_sitter_python
-from .base import LanguageProfile
+import tree_sitter_python as tspython
+from typing import Any, List
+from .base import BaseProfile
 
-
-class PythonProfile(LanguageProfile):
+class PythonProfile(BaseProfile):
     """
-    Profile for Python, providing tree-sitter queries and build commands.
+    Python-specific profile for Ariadne.
     """
 
     @property
@@ -14,81 +12,56 @@ class PythonProfile(LanguageProfile):
         return "Python"
 
     @property
-    def extensions(self) -> list[str]:
+    def extensions(self) -> List[str]:
         return [".py"]
 
     def get_language_ptr(self) -> Any:
-        return tree_sitter_python.language()
-
-    def get_query(self, symbol_name: str) -> str:
-        """
-        Construct a tree-sitter query to find a named item (function, class, etc.).
-        """
-        return f"""
-        [
-          (function_definition name: (identifier) @symbol_name (#eq? @symbol_name "{symbol_name}"))
-          (class_definition name: (identifier) @symbol_name (#eq? @symbol_name "{symbol_name}"))
-        ] @node
-        """
+        return tspython.language()
 
     def get_skeleton_query(self) -> str:
         """
-        Return the query to find major items for skeletonization.
+        Query to find function/method/class bodies for skeletonization.
         """
         return """
-        [
-          (function_definition)
-          (class_definition)
-        ] @item
+        (function_definition body: (block) @body)
+        (class_definition body: (block) @body)
+        """
+
+    def get_symbol_query(self, symbol_name: str) -> str:
+        """
+        Query to find a specific function or class by name.
+        """
+        return f"""
+        (function_definition
+            name: (identifier) @name
+            (#eq? @name "{symbol_name}")
+        ) @symbol
+
+        (class_definition
+            name: (identifier) @name
+            (#eq? @name "{symbol_name}")
+        ) @symbol
         """
 
     @property
-    def skeleton_capture_name(self) -> str:
-        return "item"
+    def symbol_capture_name(self) -> str:
+        return "symbol"
 
-    @property
-    def test_generation_system_prompt(self) -> str:
-        return (
-            "You are a Python testing expert. Your sole task is to generate isolated Python unit tests using `pytest` or `unittest`.\n"
-            "The code provided in the context (`Context API Surface`) defines the available classes and functions.\n"
-            "Your output MUST contain ONLY test functions or classes.\n"
-            "DO NOT include any of the original implementation code.\n"
-            "Output RAW PYTHON CODE ONLY. No markdown, no explanations."
-        )
-
-    def parse_search_result(self, response: str) -> Optional[str]:
+    def get_available_symbols(self, filepaths: List[str]) -> List[str]:
         """
-        Parse the LLM's raw response to extract the function/item name.
+        Extracts all function and class names from the target files.
         """
-        target_name = response.strip()
-
-        # Try to extract just the function name (e.g., from 'def my_func')
-        fn_match = re.search(r"def\s+(\w+)", target_name)
-        if fn_match:
-            return fn_match.group(1)
-
-        # Basic sanitization: take the first line, strip whitespace
-        target_name = target_name.split("\n")[0].strip()
-        return target_name if target_name else None
-
-    @property
-    def target_capture_name(self) -> str:
-        return "node"
-
-    @property
-    def coding_example(self) -> str:
-        return (
-            '{\n'
-            '  "edits": [\n'
-            '    {\n'
-            '      "symbol": "process_data",\n'
-            '      "new_code": "def process_data():\\n    pass"\n'
-            '    }\n'
-            '  ]\n'
-            '}'
-        )
-
-    @property
-    def check_command(self) -> list[str]:
-        # Using the project-local venv for validation
-        return [".\\.venv\\Scripts\\python.exe", "-m", "py_compile"]
+        query = """
+        (function_definition name: (identifier) @name)
+        (class_definition name: (identifier) @name)
+        """
+        symbols = []
+        for path in filepaths:
+            try:
+                with open(path, "rb") as f:
+                    source = f.read()
+                nodes = self.sensor.query_nodes(source, query, "name")
+                symbols.extend([n["code"] for n in nodes])
+            except Exception:
+                continue
+        return list(set(symbols))

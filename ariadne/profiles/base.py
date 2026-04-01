@@ -1,12 +1,24 @@
+import logging
 from abc import ABC, abstractmethod
-from typing import Any, Optional
+from typing import Any, Optional, Tuple, List, Dict
+from ariadne.components import TreeSitterSensor
 
+logger = logging.getLogger("ariadne.profiles")
 
-class LanguageProfile(ABC):
+class BaseProfile(ABC):
     """
     Base class for language-specific configurations in Ariadne.
-    Similar to a Neovim Lua config, but in Python.
+    Encapsulates Tree-sitter queries and high-level AST operations.
     """
+
+    def __init__(self):
+        self._sensor: Optional[TreeSitterSensor] = None
+
+    @property
+    def sensor(self) -> TreeSitterSensor:
+        if self._sensor is None:
+            self._sensor = TreeSitterSensor(self.get_language_ptr())
+        return self._sensor
 
     @property
     @abstractmethod
@@ -16,7 +28,7 @@ class LanguageProfile(ABC):
 
     @property
     @abstractmethod
-    def extensions(self) -> list[str]:
+    def extensions(self) -> List[str]:
         """List of file extensions supported by this profile (e.g., ['.rs'])."""
         pass
 
@@ -26,60 +38,47 @@ class LanguageProfile(ABC):
         pass
 
     @abstractmethod
-    def get_query(self, symbol_name: str) -> str:
-        """Return the Tree-sitter query string to find the target symbol."""
-        pass
-
-    @abstractmethod
     def get_skeleton_query(self) -> str:
         """Return the Tree-sitter query string to find bodies to strip for skeletonization."""
         pass
 
-    @property
     @abstractmethod
-    def skeleton_capture_name(self) -> str:
-        """The Tree-sitter capture name for skeletonized functions (e.g., 'func')."""
+    def get_symbol_query(self, symbol_name: str) -> str:
+        """Return the Tree-sitter query string to find the target symbol."""
         pass
 
     @property
     @abstractmethod
-    def test_generation_system_prompt(self) -> str:
-        """The system prompt for generating language-specific unit tests."""
-        pass
-
-    @abstractmethod
-    def parse_search_result(self, response: str) -> Optional[str]:
-        """
-        Parse the LLM's raw response from the SEARCH state to extract
-        the target function/item name.
-        """
-        pass
-
-    @property
-    @abstractmethod
-    def target_capture_name(self) -> str:
+    def symbol_capture_name(self) -> str:
         """The Tree-sitter capture name for target symbols (e.g., 'function')."""
         pass
 
-    @property
-    @abstractmethod
-    def coding_example(self) -> str:
-        """Language-specific JSON example for the coding prompt."""
-        pass
+    def get_skeleton(self, filepath: str) -> Tuple[str, str]:
+        """Generates a skeleton of the file by stripping function bodies."""
+        try:
+            with open(filepath, "rb") as f:
+                source = f.read()
+            skeleton = self.sensor.skeletonize(source, self.get_skeleton_query())
+            return "SUCCESS", skeleton
+        except Exception as e:
+            logger.error(f"Failed to generate skeleton for {filepath}: {e}")
+            return "ERROR", str(e)
 
-    @property
-    def coding_system_prompt(self) -> str:
-        """The system prompt for generating multi-symbol code fixes in JSON format."""
-        return (
-            f"You are an expert {self.name} developer and an automated surgical execution engine.\n"
-            "You MUST output ONLY a SINGLE valid JSON object. No markdown formatting, no conversational text, no explanations, and NO trailing commas.\n"
-            "The JSON object MUST contain exactly one key called 'edits', which is an array of objects.\n"
-            "Each object in the array MUST contain 'symbol' and 'new_code'.\n"
-            "Example Expected Output:\n"
-            f"{self.coding_example}"
-        )
+    def find_symbol(self, filepath: str, symbol_name: str) -> Tuple[str, List[Dict[str, Any]]]:
+        """Finds all occurrences of a symbol in a file."""
+        try:
+            with open(filepath, "rb") as f:
+                source = f.read()
+            query = self.get_symbol_query(symbol_name)
+            nodes = self.sensor.query_nodes(source, query, self.symbol_capture_name)
+            return "SUCCESS", nodes
+        except Exception as e:
+            logger.error(f"Failed to find symbol {symbol_name} in {filepath}: {e}")
+            return "ERROR", []
 
-    @property
-    def check_command(self) -> Optional[list[str]]:
-        """The default build/lint command for this language."""
-        return None
+    def get_available_symbols(self, filepaths: List[str]) -> List[str]:
+        """Returns a list of all function/class symbols available in the targets."""
+        all_symbols = []
+        # This is a simplified version; usually we'd have a 'list all symbols' query
+        # For now, we'll return an empty list or implement a basic 'all_functions' query in profiles
+        return all_symbols

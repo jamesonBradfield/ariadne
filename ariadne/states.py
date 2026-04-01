@@ -14,6 +14,18 @@ from .components import TreeSitterSensor
 
 logger = logging.getLogger("ariadne.states")
 
+def get_payload_attr(payload: Any, attr: str, default: Any = None) -> Any:
+    """Safely gets an attribute from either a JobPayload object or a dict."""
+    if isinstance(payload, dict):
+        return payload.get(attr, default)
+    return getattr(payload, attr, default)
+
+def set_payload_attr(payload: Any, attr: str, value: Any) -> None:
+    """Safely sets an attribute on either a JobPayload object or a dict."""
+    if isinstance(payload, dict):
+        payload[attr] = value
+    else:
+        setattr(payload, attr, value)
 
 class TRIAGE(State):
     """
@@ -32,7 +44,7 @@ class TRIAGE(State):
         system_prompt = state_config["system_prompt"]
         user_prompt = self.config_manager.render_prompt(
             state_config["user_prompt_template"],
-            {"input": payload.get("input", "")}
+            {"input": get_payload_attr(payload, "input", "") or get_payload_attr(payload, "intent", "")}
         )
 
         query = QueryLLM(model=model_info.get("model"), api_base=model_info.get("api_base"))
@@ -45,10 +57,18 @@ class TRIAGE(State):
         if status != "SUCCESS":
             return "ABORT", JobPayload(intent="Failed to triage")
 
+        # Handle LLM refusals
+        if "I cannot" in technical_intent or "I am an AI" in technical_intent:
+            logger.error("LLM refused to triage the intent. Check prompts or model safety settings.")
+            return "ABORT", JobPayload(intent=f"LLM Refusal: {technical_intent}")
+
         job = JobPayload(
             intent=technical_intent.strip(),
-            target_files=payload.get("target_files", [])
+            target_files=get_payload_attr(payload, "target_files", [])
         )
+        # Preserve app reference
+        job.app = get_payload_attr(payload, "app")
+
         return "DISPATCH", job
 
 
@@ -69,6 +89,7 @@ class DISPATCH(State):
 
         skeletons = []
         for f in self.target_files:
+            if not os.path.exists(f): continue
             status, result = self.profile.get_skeleton(f)
             if status == "SUCCESS":
                 skeletons.append(f"File: {f}\n{result}")
@@ -83,6 +104,10 @@ class DISPATCH(State):
             state_config["user_prompt_template"],
             {"intent": job.intent, "skeleton_context": skeleton_context, "language": self.profile.name}
         )
+
+        # Inject app into prompt_user for TUI support
+        if hasattr(job, "app") and job.app:
+            self.prompt_user.app = job.app
 
         query = QueryLLM(model=model_info.get("model"), api_base=model_info.get("api_base"))
         status, test_code = query.tick({
@@ -154,10 +179,11 @@ class EVALUATE(State):
             
             failing_file, failing_line = self._parse_failure(output)
             if failing_file and failing_line:
-                logger.info(f"Detected failure at {failing_file}:{failing_line}. Transitioning to INTERVENE.")
+                logger.info(f"Detected failure location at {failing_file}:{failing_line}. Hints added to payload.")
                 job.failing_file = failing_file
                 job.failing_line = failing_line
-                return "INTERVENE", job
+                # We NO LONGER transition directly to INTERVENE. 
+                # Let THINKING try to fix it automatically first.
 
             return "THINKING", job
 
@@ -172,7 +198,7 @@ class INTERVENE(State):
 
     def _open_editor(self, command: str, payload: Any) -> None:
         """Helper to open editor safely in TUI or CLI mode."""
-        app = getattr(payload, "app", None) if hasattr(payload, "app") else payload.get("app")
+        app = get_payload_attr(payload, "app")
         if app:
             from .tui import EditorMessage
             completion_event = threading.Event()
@@ -184,62 +210,55 @@ class INTERVENE(State):
     def tick(self, payload: Any) -> Tuple[str, Any]:
         editor_cfg = self.config_manager.config.get("editor", {})
         if editor_cfg.get("headless", False):
-            next_state = getattr(payload, "next_headless_state", "ROUTER") if hasattr(payload, "next_headless_state") else payload.get("next_headless_state", "ROUTER")
+            next_state = get_payload_attr(payload, "next_headless_state", "ROUTER")
             return next_state, payload
 
         command_template = editor_cfg.get("command_template", "nvim +{line} {file}")
         
         # Scenario A: Intent Elaboration
-        needs_elaboration = getattr(payload, "needs_elaboration", False) if hasattr(payload, "needs_elaboration") else payload.get("needs_elaboration", False)
+        needs_elaboration = get_payload_attr(payload, "needs_elaboration", False)
         if needs_elaboration:
-            intent = getattr(payload, "intent", "") if hasattr(payload, "intent") else payload.get("intent", "")
-            with tempfile.NamedTemporaryFile(suffix=".md", mode='w+', delete=False) as tf:
+            original_intent = get_payload_attr(payload, "intent", "")
+            with tempfile.NamedTemporaryFile(suffix=".md", mode='w', encoding='utf-8', delete=False) as tf:
                 tf.write("# Ariadne Intent Elaboration\n")
                 tf.write("Edit the text below to refine your coding objective.\n")
                 tf.write("Save and exit your editor to continue execution.\n")
                 tf.write("────────────────────────────────────────────────────────────────────────\n\n")
-                tf.write(intent)
+                tf.write(original_intent)
                 temp_path = tf.name
             
             cmd = command_template.format(line=5, file=temp_path)
             logger.info(f"Opening editor for intent elaboration: {cmd}")
             self._open_editor(cmd, payload)
             
-            with open(temp_path, 'r') as f:
+            with open(temp_path, 'r', encoding='utf-8') as f:
                 content = f.read()
-                # Split on our visual divider
                 parts = content.split('────────────────────────────────────────────────────────────────────────', 1)
                 new_intent = parts[-1].strip() if len(parts) > 1 else content.strip()
             
             os.unlink(temp_path)
             
-            if isinstance(payload, JobPayload):
-                payload.intent = new_intent
-                payload.needs_elaboration = False
-            else:
-                payload["intent"] = new_intent
-                payload["needs_elaboration"] = False
+            final_intent = new_intent if new_intent else original_intent
+            set_payload_attr(payload, "intent", final_intent)
+            set_payload_attr(payload, "needs_elaboration", False)
                 
             return "TRIAGE", payload
 
         # Scenario B: Manual Fix Intervention
-        failing_file = getattr(payload, "failing_file", None) if hasattr(payload, "failing_file") else payload.get("failing_file")
+        failing_file = get_payload_attr(payload, "failing_file")
         if failing_file:
-            line = getattr(payload, "failing_line", "1") if hasattr(payload, "failing_line") else payload.get("failing_line", "1")
+            line = get_payload_attr(payload, "failing_line", "1")
             cmd = command_template.format(line=line, file=failing_file)
             logger.info(f"Opening editor for manual fix: {cmd}")
             self._open_editor(cmd, payload)
             
-            if isinstance(payload, JobPayload):
-                if hasattr(payload, "failing_file"):
-                    delattr(payload, "failing_file")
-                if hasattr(payload, "failing_line"):
-                    delattr(payload, "failing_line")
+            # Clear failing info after intervention
+            if isinstance(payload, dict):
+                payload.pop("failing_file", None)
+                payload.pop("failing_line", None)
             else:
-                if "failing_file" in payload:
-                    del payload["failing_file"]
-                if "failing_line" in payload:
-                    del payload["failing_line"]
+                if hasattr(payload, "failing_file"): delattr(payload, "failing_file")
+                if hasattr(payload, "failing_line"): delattr(payload, "failing_line")
                 
             return "EVALUATE", payload
 
@@ -260,6 +279,7 @@ class THINKING(State):
 
         skeletons = []
         for f in job.target_files:
+            if not os.path.exists(f): continue
             status, result = self.profile.get_skeleton(f)
             if status == "SUCCESS":
                 skeletons.append(f"File: {f}\n{result}")
@@ -290,7 +310,7 @@ class THINKING(State):
         })
 
         if status != "SUCCESS":
-            return "ABORT", job
+            return "ROUTER", job
 
         job.plan = plan
         
@@ -340,6 +360,12 @@ class ROUTER(State):
         next_state = decision.get("next_state", "ABORT")
         logger.info(f"Router decision: {next_state} (Reasoning: {decision.get('reasoning')})")
         
+        # If the LLM is stuck and repeating THINKING/MAPS too many times, 
+        # let's suggest INTERVENE as a circuit breaker.
+        if job.retry_count > 5 and next_state in ["THINKING", "SEARCH"]:
+             logger.warning("Engine seems stuck in a loop. Recommending INTERVENE.")
+             return "INTERVENE", job
+
         job.retry_count += 1
         if job.retry_count > 10:
             logger.error("Max retries exceeded. Aborting.")
@@ -368,6 +394,7 @@ class SEARCH(State):
         for step in job.plan["steps"]:
             symbol = step["symbol"]
             for filepath in job.target_files:
+                if not os.path.exists(filepath): continue
                 status, nodes = self.profile.find_symbol(filepath, symbol)
                 if status == "SUCCESS" and nodes:
                     for node in nodes:
