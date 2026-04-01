@@ -271,22 +271,38 @@ class PromptUser(State):
 
     def __init__(self):
         super().__init__("PROMPT_USER")
+        self.app = None # Set by engine if TUI is enabled
 
     def tick(self, proposal: str) -> Tuple[str, bool]:
         import os
-        print(f"\n[PROPOSAL]\n{proposal}\n")
+        import threading
         
         if os.getenv("ARIADNE_AUTO_ACCEPT") == "true":
-            print("Auto-accepting proposal due to ARIADNE_AUTO_ACCEPT=true")
+            logger.info("Auto-accepting proposal due to ARIADNE_AUTO_ACCEPT=true")
             return "ACCEPTED", True
 
-        while True:
-            choice = input("Proceed? (y/n): ").strip().lower()
-            if choice in ["y", "yes"]:
-                return "ACCEPTED", True
-            if choice in ["n", "no"]:
-                return "REJECTED", False
-            print("Please enter 'y' or 'n'.")
+        if self.app:
+            # TUI Mode: Use message passing and wait for event
+            from .tui import PromptUserMessage
+            response_event = threading.Event()
+            response_container = {"approved": False}
+            
+            self.app.post_message(PromptUserMessage(proposal, response_event, response_container))
+            
+            # This blocks the engine thread, but NOT the TUI thread
+            response_event.wait()
+            approved = response_container["approved"]
+            return "ACCEPTED" if approved else "REJECTED", approved
+        else:
+            # CLI Mode: Use standard input
+            print(f"\n[PROPOSAL]\n{proposal}\n")
+            while True:
+                choice = input("Proceed? (y/n): ").strip().lower()
+                if choice in ["y", "yes"]:
+                    return "ACCEPTED", True
+                if choice in ["n", "no"]:
+                    return "REJECTED", False
+                print("Please enter 'y' or 'n'.")
 
 
 class WriteFile(State):

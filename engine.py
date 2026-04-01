@@ -2,6 +2,7 @@ import argparse
 import logging
 import os
 import json
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 from ariadne.core import EngineContext, State
@@ -9,13 +10,24 @@ from ariadne.payloads import JobPayload
 from ariadne.primitives import QueryLLM, ASTSplice
 from ariadne.states import TRIAGE, DISPATCH, EVALUATE, THINKING, ROUTER, SEARCH, SENSE, MAPS, SYNTAX_GATE, ACTUATE, POST_MORTEM
 from ariadne.components import TreeSitterSensor, SyntaxGate
+from ariadne.tui import AriadneApp, StateTransitionMessage
 
 # Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%H:%M:%S",
-)
+def setup_logging(log_level="INFO", tui_mode=False):
+    # Clear existing handlers
+    for handler in logging.root.handlers[:]:
+        logging.root.removeHandler(handler)
+        
+    if not tui_mode:
+        logging.basicConfig(
+            level=getattr(logging, log_level.upper()),
+            format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%H:%M:%S",
+        )
+    else:
+        # Just set level, no handlers. TUI will add its own.
+        logging.root.setLevel(getattr(logging, log_level.upper()))
+
 logger = logging.getLogger("ariadne.core")
 
 
@@ -131,64 +143,16 @@ class IgnoreHandler:
         return any(pattern in path for pattern in self.ignore_patterns)
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Ariadne ECU: Surgical Code Repair Engine")
-    parser.add_argument("--targets", nargs="+", help="Files or directories to ingest")
-    parser.add_argument("--profile", default="rust", help="Language profile to use")
-    parser.add_argument("--config", default="ariadne_config.json", help="Path to LLM configuration JSON")
-    parser.add_argument("--log-level", default="INFO", help="Logging level")
-    parser.add_argument("--intent", default="Implement armor mitigation and death state in take_damage method.", help="The user request or coding intent")
-    parser.add_argument("--initial-state", default="TRIAGE", help="The starting state for the engine")
-    args = parser.parse_args()
-
-    logging.getLogger("ariadne").setLevel(args.log_level)
-
-    # 1. Load Configuration and Profile
-    config_manager = ConfigManager(args.config)
-    profile = ProfileLoader.load_profile(args.profile)
+def run_engine_loop(context: EngineContext, states_registry: Dict[str, State], initial_payload: Any, app: Optional[AriadneApp] = None):
+    """
+    Executes the HFSM loop. Can be run in a background thread.
+    """
+    payload = initial_payload
     
-    # 2. Expand Targets
-    target_files = ProfileLoader.expand_targets(args.targets or ["."], profile)
-    if not target_files:
-        logger.critical("No target files found! Check your --targets or .ariadneignore.")
-        return
+    if app:
+        intent = getattr(payload, "intent", payload.get("intent", "")) if payload else ""
+        app.call_from_thread(app.update_intent, intent)
 
-    logger.info(f"Loaded {profile.name} profile with {len(target_files)} files.")
-
-    # 3. Register our available states
-    states_registry = {
-        "TRIAGE": TRIAGE(config_manager),
-        "DISPATCH": DISPATCH(
-            config_manager, 
-            test_filepath=f"test_contract{profile.extensions[0]}", 
-            profile=profile,
-            target_files=target_files
-        ),
-        "EVALUATE": EVALUATE(
-            test_command=f"python scripts/run_rust_tests.py {target_files[0]} test_contract{profile.extensions[0]}" 
-            if profile.name == "Rust" else f"python scripts/run_python_tests.py {target_files[0]} test_contract{profile.extensions[0]}"
-        ),
-        "THINKING": THINKING(config_manager, profile),
-        "ROUTER": ROUTER(config_manager),
-        "SEARCH": SEARCH(config_manager, profile),
-
-        "SENSE": SENSE(profile),
-        "MAPS": MAPS(config_manager, profile),
-        "SYNTAX_GATE": SYNTAX_GATE(profile),
-        "ACTUATE": ACTUATE(),
-        "POST_MORTEM": POST_MORTEM(config_manager),
-    }
-
-    # 4. Initialize Engine Context
-    context = EngineContext(initial_state=args.initial_state.upper())
-    
-    if context.current_state == "TRIAGE":
-        payload = {"input": args.intent, "target_files": target_files}
-    else:
-        # If bypassing TRIAGE/DISPATCH, mock the payload structure they would have created
-        payload = JobPayload(intent=args.intent, target_files=target_files)
-
-    # 5. Run the Loop
     while context.current_state != "FINISH":
         logger.info(f"--- TICKING: {context.current_state} ---")
         
@@ -196,6 +160,31 @@ def main():
         if context.current_state in ["SUCCESS", "ABORT"]:
              context.transition("POST_MORTEM")
              logger.info(f"Terminal state {context.current_state} reached. Transitioning to POST_MORTEM.")
+
+        if app:
+            retry_count = getattr(payload, "retry_count", 0) if hasattr(payload, "retry_count") else 0
+            app.post_message(StateTransitionMessage(context.current_state, retry_count))
+            
+            # Update Plan tab if plan changed
+            if hasattr(payload, "plan") and payload.plan:
+                app.call_from_thread(app.update_plan, payload.plan)
+            
+            # Update Surgeon tab if MAPS has extracted nodes
+            if hasattr(payload, "extracted_nodes") and payload.extracted_nodes:
+                # Show the currently active node being worked on by MAPS
+                idx = getattr(payload, "maps_state", {}).get("current_target_index", 0)
+                if idx < len(payload.extracted_nodes):
+                    node = payload.extracted_nodes[idx]
+                    edits = payload.fixed_code.get("edits", []) if hasattr(payload, "fixed_code") else []
+                    app.call_from_thread(app.update_surgeon, node["symbol"], node["node_string"], edits)
+
+            # Update History tab
+            if hasattr(payload, "plan_history") and payload.plan_history:
+                app.call_from_thread(app.update_history, payload.plan_history)
+
+            # Update Test Output tab if failure occurred
+            if hasattr(payload, "test_stdout") and payload.test_stdout:
+                 app.call_from_thread(app.write_test_output, payload.test_stdout)
 
         active_state = states_registry.get(context.current_state)
         
@@ -215,8 +204,123 @@ def main():
 
         if current_state_name == "FINISH":
              break
+             
+    if app:
+        app.post_message(StateTransitionMessage("FINISH", 0))
 
     logger.info(f"Engine dropped to terminal state: {context.current_state}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Ariadne ECU: Surgical Code Repair Engine")
+    parser.add_argument("--targets", nargs="+", help="Files or directories to ingest")
+    parser.add_argument("--profile", default="rust", help="Language profile to use")
+    parser.add_argument("--config", default="ariadne_config.json", help="Path to LLM configuration JSON")
+    parser.add_argument("--log-level", default="INFO", help="Logging level")
+    parser.add_argument("--intent", default="Implement armor mitigation and death state in take_damage method.", help="The user request or coding intent")
+    parser.add_argument("--initial-state", default="TRIAGE", help="The starting state for the engine")
+    parser.add_argument("--tui", action="store_true", help="Enable the Textual Dashboard TUI")
+    args = parser.parse_args()
+
+    setup_logging(args.log_level, args.tui)
+
+    # 1. Load Configuration and Profile
+    config_manager = ConfigManager(args.config)
+    profile = ProfileLoader.load_profile(args.profile)
+    
+    # 2. Expand Targets (Allow empty if TUI is coming)
+    target_files = ProfileLoader.expand_targets(args.targets or ["."], profile)
+    if not target_files and not args.tui:
+        logger.critical("No target files found! Check your --targets or .ariadneignore.")
+        return
+
+    if target_files:
+        logger.info(f"Loaded {profile.name} profile with {len(target_files)} files.")
+    else:
+        logger.info(f"Loaded {profile.name} profile. Waiting for targets in TUI...")
+
+    # 3. Registry Creation Helper
+    def create_states(target_files_list: List[str]):
+        return {
+            "TRIAGE": TRIAGE(config_manager),
+            "DISPATCH": DISPATCH(
+                config_manager, 
+                test_filepath=f"test_contract{profile.extensions[0]}", 
+                profile=profile,
+                target_files=target_files_list
+            ),
+            "EVALUATE": EVALUATE(
+                test_command=f"python scripts/run_rust_tests.py {target_files_list[0]} test_contract{profile.extensions[0]}" 
+                if target_files_list and profile.name == "Rust" else 
+                f"python scripts/run_python_tests.py {target_files_list[0]} test_contract{profile.extensions[0]}"
+                if target_files_list else "echo No targets provided"
+            ),
+            "THINKING": THINKING(config_manager, profile),
+            "ROUTER": ROUTER(config_manager),
+            "SEARCH": SEARCH(config_manager, profile),
+
+            "SENSE": SENSE(profile),
+            "MAPS": MAPS(config_manager, profile),
+            "SYNTAX_GATE": SYNTAX_GATE(profile),
+            "ACTUATE": ACTUATE(),
+            "POST_MORTEM": POST_MORTEM(config_manager),
+        }
+
+    states_registry = create_states(target_files)
+
+    # 4. Initialize Engine Context
+    context = EngineContext(initial_state=args.initial_state.upper())
+    
+    if context.current_state == "TRIAGE":
+        payload = {"input": args.intent, "target_files": target_files}
+    else:
+        # If bypassing TRIAGE/DISPATCH, mock the payload structure they would have created
+        payload = JobPayload(intent=args.intent, target_files=target_files)
+
+    # 5. Launch UI or CLI Loop
+    if args.tui:
+        from ariadne.tui import SetupScreen
+        app = AriadneApp()
+        
+        def start_engine_callback(setup_data: Dict[str, Any]):
+            nonlocal target_files, states_registry, payload
+            
+            new_intent = setup_data.get("intent", args.intent)
+            new_targets_raw = setup_data.get("targets", "")
+            
+            if new_targets_raw:
+                new_targets_list = [t.strip() for t in new_targets_raw.split(",") if t.strip()]
+                target_files = ProfileLoader.expand_targets(new_targets_list, profile)
+            
+            # Re-build states and payload
+            states_registry = create_states(target_files)
+            
+            if context.current_state == "TRIAGE":
+                payload = {"input": new_intent, "target_files": target_files}
+            else:
+                payload = JobPayload(intent=new_intent, target_files=target_files)
+
+            if "DISPATCH" in states_registry:
+                dispatch_state = states_registry["DISPATCH"]
+                if hasattr(dispatch_state, "prompt_user"):
+                    dispatch_state.prompt_user.app = app
+
+            engine_thread = threading.Thread(
+                target=run_engine_loop,
+                args=(context, states_registry, payload, app),
+                daemon=True
+            )
+            engine_thread.start()
+
+        app.start_callback = start_engine_callback
+        app.initial_setup_data = {
+            "intent": args.intent,
+            "targets": ", ".join(args.targets) if args.targets else ""
+        }
+        
+        app.run()
+    else:
+        run_engine_loop(context, states_registry, payload)
 
 
 if __name__ == "__main__":
