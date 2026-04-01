@@ -1,2 +1,3 @@
 litellm==1.82.6
 textual>=0.50.0
+pyperclip

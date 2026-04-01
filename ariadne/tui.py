@@ -3,6 +3,7 @@ import threading
 import sys
 import subprocess
 import shlex
+import pyperclip
 from datetime import datetime
 from typing import Any, Dict, Optional, List, Callable
 
@@ -128,6 +129,7 @@ class AriadneApp(App):
         Binding("l", "next_tab", "Next Tab"),
         Binding("j", "scroll_down", "Down", show=False),
         Binding("k", "scroll_up", "Up", show=False),
+        Binding("y", "yank", "Yank"),
         Binding("c", "open_setup", "Configure"),
         Binding("enter", "approve", "Approve", show=False),
         Binding("escape", "reject", "Reject", show=False),
@@ -327,6 +329,29 @@ class AriadneApp(App):
                 widget.scroll_down() if direction > 0 else widget.scroll_up()
             except Exception: pass
 
+    def action_yank(self) -> None:
+        """Copies content of the active tab to clipboard."""
+        tabs = self.query_one(TabbedContent)
+        active = tabs.active
+        text = ""
+        label = ""
+
+        if active == "tests-tab":
+            text = str(self.query_one("#test-output", Static).renderable)
+            label = "Test Output"
+        elif active == "review-tab":
+            text = str(self.query_one("#review-text", Static).renderable)
+            label = "Proposed Contract"
+        elif active == "plan-tab":
+            text = str(self.query_one("#plan-display", Static).renderable)
+            label = "Active Plan"
+
+        if text:
+            pyperclip.copy(text)
+            self.notify(f"Copied {label} to clipboard!", severity="information")
+        else:
+            self.notify("Nothing to copy in this tab.", severity="warning")
+
     def on_mount(self) -> None:
         self.title = "Ariadne ECU Dashboard"
         handler = TextualLogHandler(self)
@@ -363,13 +388,13 @@ class AriadneApp(App):
 
     def on_editor_message(self, message: EditorMessage) -> None:
         """Handles external editor requests by suspending the TUI."""
-        def run_editor():
+        with self.suspend():
             try:
                 subprocess.run(shlex.split(message.command))
+            except Exception as e:
+                logging.error(f"Failed to run editor: {e}")
             finally:
                 message.completion_event.set()
-        
-        self.suspend(run_editor)
         
     def update_intent(self, intent: str) -> None:
         try: self.query_one("#intent-display", Static).update(f"\n[bold blue]ACTIVE INTENT[/]\n{intent}")
