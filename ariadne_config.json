@@ -1,13 +1,19 @@
 {
   "default": {
     "model": "openai/llama-cpp",
-    "api_base": "http://100.92.54.124:8080/v1",
+    "api_base": "http://localhost:8080/v1",
     "api_key": "none",
     "params": {
       "temperature": 0.0,
       "max_tokens": 4096
     }
   },
+  "editor": {
+    "command_template": "nvim +{line} {file}",
+    "blocking": true,
+    "headless": false
+  },
+
   "states": {
     "TRIAGE": {
       "system_prompt": "You are a triage agent. Output ONLY the technical intent. NO yapping. NO preamble. Output raw text only.",

@@ -5,6 +5,7 @@ import shlex
 import tempfile
 import re
 import json
+import threading
 from typing import Any, Tuple, Dict, List, Optional
 from .core import State
 from .payloads import JobPayload
@@ -169,6 +170,20 @@ class INTERVENE(State):
         super().__init__("INTERVENE")
         self.config_manager = config_manager
 
+    def _open_editor(self, command: str, payload: Any) -> None:
+        """Helper to open editor safely in TUI or CLI mode."""
+        app = getattr(payload, "app", None) if hasattr(payload, "app") else payload.get("app")
+        # Check if we injected app into the states or payload
+        # Better: PromptUser primitive already has self.app. Let's try to find it.
+        
+        if app:
+            from .tui import EditorMessage
+            completion_event = threading.Event()
+            app.post_message(EditorMessage(command, completion_event))
+            completion_event.wait()
+        else:
+            subprocess.run(shlex.split(command))
+
     def tick(self, payload: Any) -> Tuple[str, Any]:
         editor_cfg = self.config_manager.config.get("editor", {})
         if editor_cfg.get("headless", False):
@@ -189,7 +204,7 @@ class INTERVENE(State):
             
             cmd = command_template.format(line=4, file=temp_path)
             logger.info(f"Opening editor for intent elaboration: {cmd}")
-            subprocess.run(shlex.split(cmd))
+            self._open_editor(cmd, payload)
             
             with open(temp_path, 'r') as f:
                 content = f.read()
@@ -213,7 +228,7 @@ class INTERVENE(State):
             line = getattr(payload, "failing_line", "1") if hasattr(payload, "failing_line") else payload.get("failing_line", "1")
             cmd = command_template.format(line=line, file=failing_file)
             logger.info(f"Opening editor for manual fix: {cmd}")
-            subprocess.run(shlex.split(cmd))
+            self._open_editor(cmd, payload)
             
             if isinstance(payload, JobPayload):
                 if hasattr(payload, "failing_file"):

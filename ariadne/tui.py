@@ -1,6 +1,8 @@
 import logging
 import threading
 import sys
+import subprocess
+import shlex
 from datetime import datetime
 from typing import Any, Dict, Optional, List, Callable
 
@@ -30,6 +32,13 @@ class StdoutMessage(Message):
     """Sent to log raw stdout/stderr in the TUI."""
     def __init__(self, text: str) -> None:
         self.text = text
+        super().__init__()
+
+class EditorMessage(Message):
+    """Sent to request an external editor launch."""
+    def __init__(self, command: str, completion_event: threading.Event) -> None:
+        self.command = command
+        self.completion_event = completion_event
         super().__init__()
 
 class RedirectOutput:
@@ -214,7 +223,6 @@ class AriadneApp(App):
         yield Footer()
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
-        """Dynamic action availability."""
         if action == "open_setup":
             return not self.engine_running and not self.prompt_active
         if action in ("approve", "reject"):
@@ -228,17 +236,14 @@ class AriadneApp(App):
             self.add_class("review-active")
             self.query_one(TabbedContent).active = "review-tab"
             self.query_one("#runtime-status", Static).update("[bold red]Action Required[/]")
-            # Bindings for footer
             self.bind("enter", "approve", description="Approve", show=True)
             self.bind("escape", "reject", description="Reject", show=True)
-            
             scroll_view = self.query_one("#review-scroll", VerticalScroll)
             self.watch(scroll_view, "scroll_offset", self.check_review_scroll)
             self.check_review_scroll()
         else:
             self.remove_class("review-active")
             self.query_one("#runtime-status", Static).update("[bold white]Running[/]" if self.engine_running else "[bold white]Idle[/]")
-            # Revert bindings
             self.bind("enter", "approve", show=False)
             self.bind("escape", "reject", show=False)
 
@@ -355,6 +360,16 @@ class AriadneApp(App):
         self.query_one("#review-text", Static).update(message.proposal)
         self.scrolled_to_bottom = False
         self.prompt_active = True
+
+    def on_editor_message(self, message: EditorMessage) -> None:
+        """Handles external editor requests by suspending the TUI."""
+        def run_editor():
+            try:
+                subprocess.run(shlex.split(message.command))
+            finally:
+                message.completion_event.set()
+        
+        self.suspend(run_editor)
         
     def update_intent(self, intent: str) -> None:
         try: self.query_one("#intent-display", Static).update(f"\n[bold blue]ACTIVE INTENT[/]\n{intent}")
@@ -374,7 +389,7 @@ class AriadneApp(App):
             if edits:
                 text += "\n[bold green]Queued Edits:[/]\n"
                 for i, e in enumerate(edits):
-                    text += f"{i+1}. [italic]{e.get('search_text', '')[:30]}...[/] -> [italic]{e.get('replace_text', '')[:30]}...[/]\n"
+                    text += f"{i+1}. [italic]{e.get('search_text', '')[:30]}...[/] -> [italic]{edit.get('replace_text', '')[:30]}...[/]\n"
             self.query_one("#surgeon-display", Static).update(text)
         except Exception: pass
 

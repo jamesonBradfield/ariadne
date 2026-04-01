@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from ariadne.core import EngineContext, State
 from ariadne.payloads import JobPayload
 from ariadne.primitives import QueryLLM, ASTSplice
-from ariadne.states import TRIAGE, DISPATCH, EVALUATE, THINKING, ROUTER, SEARCH, SENSE, MAPS, SYNTAX_GATE, ACTUATE, POST_MORTEM
+from ariadne.states import TRIAGE, DISPATCH, EVALUATE, THINKING, ROUTER, SEARCH, SENSE, MAPS, SYNTAX_GATE, ACTUATE, POST_MORTEM, INTERVENE
 from ariadne.components import TreeSitterSensor, SyntaxGate
 from ariadne.tui import AriadneApp, StateTransitionMessage
 
@@ -62,6 +62,13 @@ class ConfigManager:
                                 self.config["default"][k] = v
                     if "states" in user_config:
                         self.config["states"].update(user_config["states"])
+                    
+                    # Merge editor config
+                    if "editor" in user_config:
+                        if "editor" not in self.config:
+                            self.config["editor"] = {}
+                        self.config["editor"].update(user_config["editor"])
+
                 logger.info(f"Loaded LLM configuration from {config_path}")
             except Exception as e:
                 logger.error(f"Failed to load config {config_path}: {e}. Using defaults.")
@@ -175,7 +182,10 @@ def run_engine_loop(context: EngineContext, states_registry: Dict[str, State], i
                 idx = getattr(payload, "maps_state", {}).get("current_target_index", 0)
                 if idx < len(payload.extracted_nodes):
                     node = payload.extracted_nodes[idx]
-                    edits = payload.fixed_code.get("edits", []) if hasattr(payload, "fixed_code") else []
+                    # FIX: Add null check for payload.fixed_code
+                    edits = []
+                    if hasattr(payload, "fixed_code") and payload.fixed_code is not None:
+                        edits = payload.fixed_code.get("edits", [])
                     app.call_from_thread(app.update_surgeon, node["symbol"], node["node_string"], edits)
 
             # Update History tab
@@ -218,8 +228,9 @@ def main():
     parser.add_argument("--config", default="ariadne_config.json", help="Path to LLM configuration JSON")
     parser.add_argument("--log-level", default="INFO", help="Logging level")
     parser.add_argument("--intent", default="Implement armor mitigation and death state in take_damage method.", help="The user request or coding intent")
-    parser.add_argument("--initial-state", default="TRIAGE", help="The starting state for the engine")
+    parser.add_argument("--initial-state", default="INTERVENE", help="The starting state for the engine")
     parser.add_argument("--tui", action="store_true", help="Enable the Textual Dashboard TUI")
+    parser.add_argument("--headless", action="store_true", help="Run without interactive editor interventions")
     args = parser.parse_args()
 
     setup_logging(args.log_level, args.tui)
@@ -228,6 +239,11 @@ def main():
     config_manager = ConfigManager(args.config)
     profile = ProfileLoader.load_profile(args.profile)
     
+    # Inject headless arg into config
+    if "editor" not in config_manager.config:
+        config_manager.config["editor"] = {}
+    config_manager.config["editor"]["headless"] = args.headless
+
     # 2. Expand Targets (Allow empty if TUI is coming)
     target_files = ProfileLoader.expand_targets(args.targets or ["."], profile)
     if not target_files and not args.tui:
@@ -264,6 +280,7 @@ def main():
             "SYNTAX_GATE": SYNTAX_GATE(profile),
             "ACTUATE": ACTUATE(),
             "POST_MORTEM": POST_MORTEM(config_manager),
+            "INTERVENE": INTERVENE(config_manager),
         }
 
     states_registry = create_states(target_files)
@@ -273,6 +290,13 @@ def main():
     
     if context.current_state == "TRIAGE":
         payload = {"input": args.intent, "target_files": target_files}
+    elif context.current_state == "INTERVENE":
+        payload = {
+            "intent": args.intent, 
+            "target_files": target_files, 
+            "needs_elaboration": True, 
+            "next_headless_state": "TRIAGE"
+        }
     else:
         # If bypassing TRIAGE/DISPATCH, mock the payload structure they would have created
         payload = JobPayload(intent=args.intent, target_files=target_files)
@@ -297,6 +321,13 @@ def main():
             
             if context.current_state == "TRIAGE":
                 payload = {"input": new_intent, "target_files": target_files}
+            elif context.current_state == "INTERVENE":
+                payload = {
+                    "intent": new_intent, 
+                    "target_files": target_files, 
+                    "needs_elaboration": True, 
+                    "next_headless_state": "TRIAGE"
+                }
             else:
                 payload = JobPayload(intent=new_intent, target_files=target_files)
 
@@ -304,6 +335,12 @@ def main():
                 dispatch_state = states_registry["DISPATCH"]
                 if hasattr(dispatch_state, "prompt_user"):
                     dispatch_state.prompt_user.app = app
+            
+            # Inject app into payload for INTERVENE
+            if isinstance(payload, JobPayload):
+                payload.app = app
+            elif isinstance(payload, dict):
+                payload["app"] = app
 
             engine_thread = threading.Thread(
                 target=run_engine_loop,
