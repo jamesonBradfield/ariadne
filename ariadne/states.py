@@ -173,9 +173,6 @@ class INTERVENE(State):
     def _open_editor(self, command: str, payload: Any) -> None:
         """Helper to open editor safely in TUI or CLI mode."""
         app = getattr(payload, "app", None) if hasattr(payload, "app") else payload.get("app")
-        # Check if we injected app into the states or payload
-        # Better: PromptUser primitive already has self.app. Let's try to find it.
-        
         if app:
             from .tui import EditorMessage
             completion_event = threading.Event()
@@ -198,17 +195,20 @@ class INTERVENE(State):
             intent = getattr(payload, "intent", "") if hasattr(payload, "intent") else payload.get("intent", "")
             with tempfile.NamedTemporaryFile(suffix=".md", mode='w+', delete=False) as tf:
                 tf.write("# Ariadne Intent Elaboration\n")
-                tf.write("Edit the text below to refine the coding objective. Save and exit to continue.\n\n")
+                tf.write("Edit the text below to refine your coding objective.\n")
+                tf.write("Save and exit your editor to continue execution.\n")
+                tf.write("────────────────────────────────────────────────────────────────────────\n\n")
                 tf.write(intent)
                 temp_path = tf.name
             
-            cmd = command_template.format(line=4, file=temp_path)
+            cmd = command_template.format(line=5, file=temp_path)
             logger.info(f"Opening editor for intent elaboration: {cmd}")
             self._open_editor(cmd, payload)
             
             with open(temp_path, 'r') as f:
                 content = f.read()
-                parts = content.split('\n\n', 1)
+                # Split on our visual divider
+                parts = content.split('────────────────────────────────────────────────────────────────────────', 1)
                 new_intent = parts[-1].strip() if len(parts) > 1 else content.strip()
             
             os.unlink(temp_path)

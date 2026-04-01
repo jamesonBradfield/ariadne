@@ -388,6 +388,10 @@ class AriadneApp(App):
 
     def on_editor_message(self, message: EditorMessage) -> None:
         """Handles external editor requests by suspending the TUI."""
+        # Visual direction before terminal takeover
+        self.notify("Launching external editor...", title="Intervention Required", severity="information")
+        self.query_one("#runtime-status", Static).update("[bold yellow]Editor Active[/]")
+        
         with self.suspend():
             try:
                 subprocess.run(shlex.split(message.command))
