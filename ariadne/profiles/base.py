@@ -37,10 +37,19 @@ class BaseProfile(ABC):
         """Return the tree-sitter language object/pointer."""
         pass
 
+    @property
+    def ast_grep_lang(self) -> Optional[str]:
+        """Return the ast-grep language string (e.g., 'rust', 'python')."""
+        return None
+
     @abstractmethod
     def get_skeleton_query(self) -> str:
         """Return the Tree-sitter query string to find bodies to strip for skeletonization."""
         pass
+
+    def get_symbol_patterns(self, symbol_name: str) -> List[str]:
+        """Return a list of ast-grep patterns to find the target symbol."""
+        return []
 
     @abstractmethod
     def get_symbol_query(self, symbol_name: str) -> str:
@@ -65,7 +74,33 @@ class BaseProfile(ABC):
             return "ERROR", str(e)
 
     def find_symbol(self, filepath: str, symbol_name: str) -> Tuple[str, List[Dict[str, Any]]]:
-        """Finds all occurrences of a symbol in a file."""
+        """Finds all occurrences of a symbol in a file, preferring ast-grep if available."""
+        if self.ast_grep_lang:
+            from ariadne.primitives import QueryAstGrep
+            querier = QueryAstGrep(self.ast_grep_lang)
+            patterns = self.get_symbol_patterns(symbol_name)
+            all_matches = []
+            for pattern in patterns:
+                status, matches = querier.tick({"filepath": filepath, "pattern": pattern})
+                if status == "SUCCESS":
+                    # Filter matches by checking if the text actually contains the symbol name 
+                    # (ast-grep patterns like 'fn $NAME' might be too broad if not careful)
+                    # But here we assume patterns are specific enough or we rely on ast-grep's precision.
+                    all_matches.extend(matches)
+            
+            if all_matches:
+                # Normalize to Tree-sitter node format used by states
+                normalized = []
+                for m in all_matches:
+                    normalized.append({
+                        "code": m["text"],
+                        "start_byte": m["start_byte"],
+                        "end_byte": m["end_byte"],
+                        "type": m["node_type"]
+                    })
+                return "SUCCESS", normalized
+
+        # Fallback to Tree-sitter
         try:
             with open(filepath, "rb") as f:
                 source = f.read()

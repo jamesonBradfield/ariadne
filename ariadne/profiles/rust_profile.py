@@ -18,6 +18,22 @@ class RustProfile(BaseProfile):
     def get_language_ptr(self) -> Any:
         return tsrust.language()
 
+    @property
+    def ast_grep_lang(self) -> str:
+        return "rust"
+
+    def get_symbol_patterns(self, symbol_name: str) -> List[str]:
+        """
+        Patterns to find a specific function, method, or struct by name.
+        """
+        return [
+            f"fn {symbol_name}($$$) {{ $$$ }}",
+            f"struct {symbol_name} {{ $$$ }}",
+            f"struct {symbol_name}($$$);",
+            f"impl {symbol_name} {{ $$$ }}",
+            f"impl $$$ for {symbol_name} {{ $$$ }}"
+        ]
+
     def get_skeleton_query(self) -> str:
         """
         Query to find function/method bodies for skeletonization.

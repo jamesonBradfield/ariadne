@@ -18,6 +18,20 @@ class PythonProfile(BaseProfile):
     def get_language_ptr(self) -> Any:
         return tspython.language()
 
+    @property
+    def ast_grep_lang(self) -> str:
+        return "python"
+
+    def get_symbol_patterns(self, symbol_name: str) -> List[str]:
+        """
+        Patterns to find a specific function or class by name.
+        """
+        return [
+            f"def {symbol_name}($$$): $$$",
+            f"class {symbol_name}: $$$",
+            f"class {symbol_name}($$$): $$$"
+        ]
+
     def get_skeleton_query(self) -> str:
         """
         Query to find function/method/class bodies for skeletonization.
