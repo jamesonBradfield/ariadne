@@ -12,7 +12,8 @@ Eliminate all directory-related friction by introducing a formal `--project-dir`
 * **Architectural Nuance**: Update the `THINKING` prompt in `ariadne_config.json` to understand the relationship between `struct` and `impl` blocks in Rust. The Architect must learn to target the **container** (the `impl` block or the `Struct` symbol) when adding new methods, not the hypothetical new method name itself, so `SENSE` can find it.
 * **Test Contract Robustness**: Update the `DISPATCH` prompt for Rust to explicitly instruct the LLM to include necessary crate imports (like `use godot::prelude::*;`) if the target code uses them. Alternatively, add a feature to `BaseProfile` to inject standard headers into generated tests.
 
-## Phase 3: Language Agnosticism Check
+## Phase 3: Language Agnosticism Check & ast-grep Migration
+* **ast-grep Integration**: Leverage the new `QueryAstGrep` primitive to replace legacy Tree-sitter query strings in language profiles. This allows for more intuitive, pattern-based symbol identification.
 * **Validation**: Ensure the new `--project-dir` logic doesn't break the Python profile tests in `benchmarks/`. It should cleanly handle both Rust and Python targets.
 * **Profile Expansion**: Prepare `base.py` to allow profiles to define "Standard Header Includes" for test generation, solving the missing import issue consistently across different languages.
 

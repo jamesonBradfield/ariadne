@@ -6,10 +6,62 @@ import asyncio
 from typing import Any, Dict, List, Optional, Tuple
 
 import tree_sitter
+from ast_grep_py import SgRoot
 
 from .core import State
 
 logger = logging.getLogger("ariadne.primitives")
+
+
+class QueryAstGrep(State):
+    """
+    Primitive for pattern-based AST searching using ast-grep.
+    Input Payload: Dict with 'filepath' and 'pattern' (or 'rule').
+    Returns: Tuple[str, List[Dict[str, Any]]] (status, matches)
+    """
+
+    def __init__(self, language: str):
+        super().__init__("QUERY_AST_GREP")
+        self.language = language
+
+    def tick(self, payload: Dict[str, Any]) -> Tuple[str, List[Dict[str, Any]]]:
+        filepath = payload.get("filepath")
+        pattern = payload.get("pattern")
+        rule = payload.get("rule")
+
+        if not filepath or (not pattern and not rule):
+            logger.warning(f"QueryAstGrep skipped: Missing parameters in {payload}")
+            return "ERROR", []
+
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                source = f.read()
+
+            root = SgRoot(source, self.language)
+            
+            matches = []
+            if rule:
+                # Rule-based search (more complex)
+                found = root.root().find_all(rule=rule)
+            else:
+                # Simple pattern search
+                found = root.root().find_all(pattern=pattern)
+
+            for node in found:
+                range_info = node.range()
+                matches.append({
+                    "text": node.text(),
+                    "start_byte": range_info.start.byte,
+                    "end_byte": range_info.end.byte,
+                    "start_line": range_info.start.line,
+                    "start_col": range_info.start.column,
+                    "node_type": node.kind()
+                })
+
+            return "SUCCESS", matches
+        except Exception as e:
+            logger.error(f"QueryAstGrep Error: {e}")
+            return "ERROR", [{"error": str(e)}]
 
 
 class QueryMCP(State):
