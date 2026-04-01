@@ -394,7 +394,10 @@ class ASTSplice(State):
 class BlockSplice(State):
     """
     Surgical string replacement within a specific AST node's byte range.
-    Input Payload: Dict with 'filepath', 'edits' (list of dicts with 'start_byte', 'end_byte', 'search_text', 'replace_text').
+    Input Payload: Dict with 'filepath', 'edits' (list of dicts).
+    Edits can have:
+    - 'new_code': Direct replacement of the entire node range.
+    - 'search_text' & 'replace_text': Legacy search-and-replace within the node range.
     Returns: Tuple[str, str] (status, filepath)
     """
 
@@ -413,51 +416,42 @@ class BlockSplice(State):
 
         try:
             with open(filepath, "rb") as f:
-                full_source = f.read()
-
-            new_source_code = full_source
+                new_source_code = f.read()
 
             for edit in edits:
-                search_text = edit["search_text"]
-                replace_text = edit["replace_text"]
                 start_byte = edit["start_byte"]
                 end_byte = edit["end_byte"]
 
-                node_bytes = new_source_code[start_byte:end_byte]
-                logger.info(f"BlockSplice edit: {start_byte}-{end_byte} (node size: {len(node_bytes)} bytes)")
-                node_text = node_bytes.decode("utf-8")
-                
-                # Normalize for replacement logic
-                # We want to replace the text regardless of whether it's \n or \r\n
-                search_norm = search_text.replace("\r\n", "\n")
-                node_norm = node_text.replace("\r\n", "\n")
-                
-                logger.info(f"BlockSplice DEBUG: search_norm length: {len(search_norm)}")
-                logger.info(f"BlockSplice DEBUG: node_norm length: {len(node_norm)}")
-                
-                if search_norm not in node_norm:
-                    logger.error(f"BlockSplice rejected: search_text not found in target node.")
-                    logger.error(f"BlockSplice DEBUG: search_norm: '{search_norm}'")
-                    logger.error(f"BlockSplice DEBUG: node_norm: '{node_norm}'")
-                    return "REJECTED", "search_text not found in node"
-
-                # Perform the replacement on normalized text
-                replace_norm = replace_text.replace("\r\n", "\n")
-                logger.info(f"BlockSplice DEBUG: search_norm: '{search_norm}'")
-                logger.info(f"BlockSplice DEBUG: node_norm: '{node_norm}'")
-                logger.info(f"BlockSplice DEBUG: replace_norm: '{replace_norm}'")
-                
-                new_node_text_norm = node_norm.replace(search_norm, replace_norm, 1)
-                logger.info(f"BlockSplice DEBUG: new_node_text_norm length: {len(new_node_text_norm)}")
-                
-                # If the original file used CRLF, try to restore it for the new node text
-                if b"\r\n" in node_bytes:
-                    new_node_text = new_node_text_norm.replace("\n", "\r\n")
+                if "new_code" in edit:
+                    # Direct replacement protocol
+                    new_node_text = edit["new_code"].replace("\r\n", "\n")
+                    # Restore CRLF if the file uses it
+                    if b"\r\n" in new_source_code[start_byte:end_byte]:
+                        new_node_text = new_node_text.replace("\n", "\r\n")
+                    new_node_bytes = new_node_text.encode("utf-8")
                 else:
-                    new_node_text = new_node_text_norm
+                    # Legacy SEARCH/REPLACE protocol
+                    search_text = edit["search_text"]
+                    replace_text = edit["replace_text"]
+                    
+                    node_bytes = new_source_code[start_byte:end_byte]
+                    node_text = node_bytes.decode("utf-8")
+                    
+                    search_norm = search_text.replace("\r\n", "\n")
+                    node_norm = node_text.replace("\r\n", "\n")
+                    
+                    if search_norm not in node_norm:
+                        logger.error(f"BlockSplice rejected: search_text not found in target node.")
+                        return "REJECTED", "search_text not found in node"
 
-                logger.info(f"BlockSplice: new_node_text length: {len(new_node_text)}")
-                new_node_bytes = new_node_text.encode("utf-8")
+                    replace_norm = replace_text.replace("\r\n", "\n")
+                    new_node_text_norm = node_norm.replace(search_norm, replace_norm, 1)
+                    
+                    if b"\r\n" in node_bytes:
+                        new_node_text = new_node_text_norm.replace("\n", "\r\n")
+                    else:
+                        new_node_text = new_node_text_norm
+                    new_node_bytes = new_node_text.encode("utf-8")
 
                 before = new_source_code[:start_byte]
                 after = new_source_code[end_byte:]

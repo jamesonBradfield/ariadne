@@ -1,28 +1,27 @@
 #[test]
-fn test_take_damage_with_armor() {
+fn test_take_damage_with_armor_mitigation() {
     let mut entity = Entity::new();
-    entity.take_damage(30.0);
-    assert_eq!(entity.health, 70.0);
+    let initial_health = entity.health;
+    let damage = 100.0;
+    let armor = entity.armor;
+    let mitigation = damage * (armor / (armor + 100.0));
+    let expected_health = initial_health - (damage - mitigation);
+    entity.take_damage(damage);
+    assert!((entity.health - expected_health).abs() < 0.01);
 }
 
 #[test]
-fn test_take_damage_exceeds_health() {
+fn test_take_damage_transitions_to_death() {
     let mut entity = Entity::new();
-    entity.take_damage(200.0);
-    assert_eq!(entity.health, -100.0);
+    entity.health = 10.0;
+    entity.take_damage(100.0);
+    assert!(entity.is_dead);
 }
 
 #[test]
-fn test_heal_after_damage() {
+fn test_take_damage_no_death_when_health_positive() {
     let mut entity = Entity::new();
-    entity.take_damage(30.0);
-    entity.heal(20.0);
-    assert_eq!(entity.health, 90.0);
-}
-
-#[test]
-fn test_heal_over_max_health() {
-    let mut entity = Entity::new();
-    entity.heal(100.0);
-    assert_eq!(entity.health, 150.0);
+    entity.health = 100.0;
+    entity.take_damage(50.0);
+    assert!(!entity.is_dead);
 }

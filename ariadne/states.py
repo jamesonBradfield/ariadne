@@ -94,7 +94,6 @@ class DISPATCH(State):
             if status == "SUCCESS":
                 skeletons.append(f"File: {f}\n{result}")
             else:
-                # FALLBACK: If skeletonization fails, provide full file (LLM will handle it if small)
                 try:
                     with open(f, 'r', encoding='utf-8') as src:
                         skeletons.append(f"File: {f} (Full Source)\n{src.read()}")
@@ -288,7 +287,6 @@ class THINKING(State):
             if status == "SUCCESS":
                 skeletons.append(f"File: {f}\n{result}")
             else:
-                # FALLBACK: Provide full source if skeletonization failed
                 try:
                     with open(f, 'r', encoding='utf-8') as src:
                         skeletons.append(f"File: {f} (Full Source)\n{src.read()}")
@@ -365,7 +363,6 @@ class ROUTER(State):
         })
 
         if status != "SUCCESS":
-            # FALLBACK: If LLM response was messy/invalid JSON, try to recover
             logger.warning(f"Router received invalid response ({status}). Attempting recovery...")
             if job.retry_count < 3:
                 return "THINKING", job
@@ -389,7 +386,7 @@ class ROUTER(State):
 
 class SEARCH(State):
     """
-    Maps symbols from the plan to concrete code locations.
+    Prepares the Surgeon's work list from the plan.
     """
     def __init__(self, config_manager, profile):
         super().__init__("SEARCH")
@@ -397,58 +394,77 @@ class SEARCH(State):
         self.profile = profile
 
     def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
-        logger.info("Searching for target symbols...")
+        logger.info("Preparing Surgeon work list...")
         
         if not job.plan or "steps" not in job.plan:
             logger.error("No plan steps found in SEARCH state.")
             return "THINKING", job
 
-        extracted_nodes = []
-        for step in job.plan["steps"]:
-            symbol = step["symbol"]
-            for filepath in job.target_files:
-                if not os.path.exists(filepath): continue
-                try:
-                    status, nodes = self.profile.find_symbol(filepath, symbol)
-                    if status == "SUCCESS" and nodes:
-                        for node in nodes:
-                            extracted_nodes.append({
-                                "filepath": filepath,
-                                "symbol": symbol,
-                                "node_string": node["code"],
-                                "start_byte": node["start_byte"],
-                                "end_byte": node["end_byte"],
-                                "node_type": node["type"]
-                            })
-                        break
-                except Exception as e:
-                    logger.error(f"Error searching for {symbol} in {filepath}: {e}")
-                    continue
+        # NEW: Initialize the surgeon loop state
+        job.maps_state = {
+            "current_step_index": 0,
+            "steps": job.plan["steps"]
+        }
+        job.extracted_nodes = [] # Clear previous sense results
         
-        if not extracted_nodes:
-            logger.warning("No symbols from plan were found in codebase.")
-            return "THINKING", job
-
-        job.extracted_nodes = extracted_nodes
-        job.maps_state = {"current_target_index": 0}
         return "SENSE", job
 
 
 class SENSE(State):
     """
-    Re-validates byte-offsets before surgeon operations.
+    Re-validates byte-offsets for the CURRENT target symbol before surgery.
     """
     def __init__(self, profile):
         super().__init__("SENSE")
         self.profile = profile
 
     def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
+        idx = job.maps_state.get("current_step_index", 0)
+        steps = job.maps_state.get("steps", [])
+        
+        if idx >= len(steps):
+            logger.info("Surgeon has processed all planned steps.")
+            return "EVALUATE", job
+
+        current_step = steps[idx]
+        symbol = current_step["symbol"]
+        
+        logger.info(f"Sensing exact byte-coordinates for symbol: {symbol}...")
+        
+        # SEARCH for the symbol's CURRENT location on disk
+        found_nodes = []
+        for filepath in job.target_files:
+            if not os.path.exists(filepath): continue
+            try:
+                status, nodes = self.profile.find_symbol(filepath, symbol)
+                if status == "SUCCESS" and nodes:
+                    for node in nodes:
+                        found_nodes.append({
+                            "filepath": filepath,
+                            "symbol": symbol,
+                            "node_string": node["code"],
+                            "start_byte": node["start_byte"],
+                            "end_byte": node["end_byte"],
+                            "node_type": node["type"]
+                        })
+                    break # Found it in this file
+            except Exception as e:
+                logger.error(f"Sensing error for {symbol} in {filepath}: {e}")
+                continue
+
+        if not found_nodes:
+            logger.warning(f"Could not sense location for {symbol}. Skipping to next step.")
+            job.maps_state["current_step_index"] += 1
+            return "SENSE", job
+
+        # Store ONLY the current target node
+        job.extracted_nodes = found_nodes 
         return "MAPS", job
 
 
 class MAPS(State):
     """
-    Surgeon state. Generates surgical SEARCH/REPLACE patches for AST nodes.
+    Surgeon state. Generates a surgical SEARCH/REPLACE patch for the sensed node.
     """
     def __init__(self, config_manager, profile):
         super().__init__("MAPS")
@@ -456,12 +472,13 @@ class MAPS(State):
         self.profile = profile
 
     def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
-        idx = job.maps_state["current_target_index"]
-        if idx >= len(job.extracted_nodes):
-            return "SYNTAX_GATE", job
+        if not job.extracted_nodes:
+            return "SENSE", job
 
-        target_node = job.extracted_nodes[idx]
-        logger.info(f"MAPS operating on {target_node['symbol']} ({idx+1}/{len(job.extracted_nodes)})")
+        # Always operate on the first sensed node for the current symbol
+        target_node = job.extracted_nodes[0]
+        
+        logger.info(f"MAPS operating on {target_node['symbol']}...")
 
         model_info = self.config_manager.get_model_info("MAPS")
         state_config = self.config_manager.config["states"]["MAPS"]
@@ -470,10 +487,17 @@ class MAPS(State):
         if hasattr(job, "llm_feedback") and job.llm_feedback:
             error_context = f"PREVIOUS ATTEMPT FAILED SYNTAX CHECK:\n{job.llm_feedback}\nPlease correct your SEARCH/REPLACE logic."
 
+        # Inject Architect reasoning for context
+        reasoning = job.plan.get("reasoning", "")
+        combined_intent = f"PLAN REASONING: {reasoning}\n\nTECHNICAL OBJECTIVE: {job.intent}"
+
+        # STRICTER PROMPT: Explicitly forbid over-generation
+        maps_system_prompt = state_config["system_prompt"] + "\n\n**CRITICAL RULE:** Your REPLACE block must contain ONLY the code for the target node. DO NOT include implementation blocks if you are editing a struct. DO NOT include other functions. Stay within the boundaries of the provided 'Target Code'."
+
         user_prompt = self.config_manager.render_prompt(
             state_config["user_prompt_template"],
             {
-                "intent": job.intent,
+                "intent": combined_intent,
                 "error_context": error_context,
                 "current_symbol": target_node["symbol"],
                 "current_node_type": target_node["node_type"],
@@ -483,27 +507,26 @@ class MAPS(State):
 
         query = QueryLLM(model=model_info.get("model"), api_base=model_info.get("api_base"))
         status, result = query.tick({
-            "system": state_config["system_prompt"],
+            "system": maps_system_prompt,
             "user": user_prompt,
             "params": model_info.get("params", {}),
             "post_process": state_config.get("post_process")
         })
 
         if status != "SUCCESS":
-            job.llm_feedback = f"Failed to generate valid SEARCH/REPLACE block: {result}"
+            job.llm_feedback = f"Failed to generate valid repair block: {result}"
             return "ROUTER", job
 
+        # New protocol: Replace entire node with 'repair' block
         job.fixed_code = {
             "filepath": target_node["filepath"],
             "edits": [{
                 "start_byte": target_node["start_byte"],
                 "end_byte": target_node["end_byte"],
-                "search_text": result["search"],
-                "replace_text": result["replace"]
+                "new_code": result["repair"]
             }]
         }
         
-        job.maps_state["current_target_index"] += 1
         return "SYNTAX_GATE", job
 
 
@@ -516,38 +539,29 @@ class SYNTAX_GATE(State):
         self.profile = profile
 
     def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
-        logger.info("Validating syntax of proposed edits...")
+        logger.info("Validating syntax of proposed repair...")
         
         if not job.fixed_code:
             return "ACTUATE", job
 
-        sensor = TreeSitterSensor(self.profile.language_ptr)
+        sensor = TreeSitterSensor(self.profile.get_language_ptr())
         
         with open(job.fixed_code["filepath"], "rb") as f:
             source = f.read()
 
         edit = job.fixed_code["edits"][0]
-        node_text = source[edit["start_byte"]:edit["end_byte"]].decode("utf-8")
+        new_code = edit["new_code"].replace("\r\n", "\n")
         
-        search_norm = edit["search_text"].replace("\r\n", "\n")
-        replace_norm = edit["replace_text"].replace("\r\n", "\n")
-        node_norm = node_text.replace("\r\n", "\n")
-
-        if search_norm not in node_norm:
-            job.llm_feedback = "The SEARCH block did not match the source code exactly."
-            return "ROUTER", job
-
-        new_node_text = node_norm.replace(search_norm, replace_norm, 1)
-        
+        # Syntax check the entire file with the surgical repair applied
         is_valid, error = sensor.validate_repair(source, [{
             "start_byte": edit["start_byte"],
             "end_byte": edit["end_byte"],
-            "new_code": new_node_text
+            "new_code": new_code
         }])
 
         if not is_valid:
             logger.error(f"Syntax validation failed: {error}")
-            job.llm_feedback = f"Syntax error in generated code: {error}"
+            job.llm_feedback = f"The proposed repair introduced a syntax error: {error}. Please ensure the code is complete and follows the language grammar."
             return "ROUTER", job
 
         logger.info("Syntax validation passed.")
@@ -557,7 +571,7 @@ class SYNTAX_GATE(State):
 
 class ACTUATE(State):
     """
-    Splices patches into the source file.
+    Splices patches into the source file and prepares for the next step.
     """
     def __init__(self):
         super().__init__("ACTUATE")
@@ -566,15 +580,17 @@ class ACTUATE(State):
         logger.info("Actuating surgical edits to disk...")
         
         if not job.fixed_code:
-            return "EVALUATE", job
+            job.maps_state["current_step_index"] += 1
+            return "SENSE", job
 
         splicer = BlockSplice()
         status, result = splicer.tick(job.fixed_code)
 
         if status == "SUCCESS":
-            if job.maps_state["current_target_index"] < len(job.extracted_nodes):
-                return "SENSE", job
-            return "EVALUATE", job
+            # Successfully edited one symbol. Move to the next.
+            job.maps_state["current_step_index"] += 1
+            job.fixed_code = None # Clear current edit
+            return "SENSE", job
         else:
             logger.error(f"Actuation failed: {result}")
             return "ABORT", job

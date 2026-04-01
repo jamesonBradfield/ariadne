@@ -1,10 +1,9 @@
 // main.rs
-use std::time::{SystemTime, UNIX_EPOCH};
 
 struct Entity {
-    health: f32,
-    armor: f32,
-    is_dead: bool,
+    pub health: f32,
+    pub armor: f32,
+    pub is_dead: bool,
 }
 
 impl Entity {
@@ -16,11 +15,28 @@ impl Entity {
         }
     }
 
-    pub fn take_damage(&mut self, damage: f32) {
-        self.health -= damage;
+    pub fn take_damage(&mut self, damage: f32) -> bool {
+        if self.is_dead {
+            return false;
+        }
+
+        let mitigation = damage * (self.armor / (self.armor + 100.0));
+        let effective_damage = damage - mitigation;
+        
+        self.health -= effective_damage;
+
+        if self.health <= 0.0 {
+            self.health = 0.0;
+            self.is_dead = true;
+        }
+        true
     }
 
-    pub fn heal(&mut self, amount: f32) {
+    pub fn heal(&mut self, amount: f32) -> bool {
+        if self.is_dead {
+            return false;
+        }
         self.health += amount;
+        true
     }
 }
