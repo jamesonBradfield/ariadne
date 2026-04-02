@@ -58,8 +58,9 @@
       "post_process": "extract_json"
     },
     "POST_MORTEM": {
-      "system_prompt": "You are a Surgical Post-Mortem Analyst. Summarize the repair session based on the provided metrics. Focus on accuracy and performance.",
-      "user_prompt_template": "Intent: {{intent}}\nFinal Status: {{final_state}}\nRetry Count: {{retry_count}}"
+      "system_prompt": "You are a Self-Optimization Analyst. Analyze the provided interaction history of a failed or difficult repair session. Identify the EXACT turn where the model made a mistake (e.g., trying to navigate up when it should have selected). Create a compact evaluation case in JSON format that can be used by textgrad to optimize the system prompt. Focus on the most critical failure. Output must follow the SelfOptimizationResponse schema.",
+      "user_prompt_template": "Interaction History:\n{{history}}",
+      "params": { "max_tokens": 2048 }
     }
   },
   "mcp": {

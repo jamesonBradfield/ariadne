@@ -29,6 +29,26 @@ class MapsSurgeonResponse(BaseModel):
     action: str
     code: str = ""
 
+class SelfOptimizationResponse(BaseModel):
+    id: str
+    state: str
+    intent: str
+    current_symbol: str = ""
+    error_context: str = ""
+    ast_view: str = ""
+    node_snippet: str = ""
+    hover_info: str = ""
+    diagnostics: str = ""
+    expected_action: str
+    expected_target_id: Optional[Union[str, int]] = None
+    anti_expected_action: str
+
+class InteractionTrace(BaseModel):
+    state: str
+    user_prompt: str
+    system_prompt: str
+    response: str
+
 # --- Engine Payload ---
 
 class JobPayload(BaseModel):
@@ -53,6 +73,9 @@ class JobPayload(BaseModel):
     maps_state: Dict[str, Any] = Field(default_factory=dict)
     fixed_code: Optional[Dict[str, Any]] = None
     llm_feedback: Optional[str] = None
+    
+    # Trace for self-optimization
+    interaction_history: List[InteractionTrace] = Field(default_factory=list)
     
     # Global state
     retry_count: int = 0

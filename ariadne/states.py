@@ -18,6 +18,25 @@ from .components import TreeSitterSensor
 
 logger = logging.getLogger("ariadne.states")
 
+def record_interaction(job: JobPayload, state: str, system: str, user: str, response: Any):
+    """Logs an LLM interaction to the job history for self-optimization."""
+    from .payloads import InteractionTrace
+    
+    # If response is a Pydantic model, dump it to JSON string
+    resp_str = ""
+    if hasattr(response, "model_dump_json"):
+        resp_str = response.model_dump_json()
+    else:
+        resp_str = str(response)
+
+    trace = InteractionTrace(
+        state=state,
+        system_prompt=system,
+        user_prompt=user,
+        response=resp_str
+    )
+    job.interaction_history.append(trace)
+
 class TRIAGE(State):
     """
     Initial state to distill user intent into a technical objective.
@@ -44,6 +63,12 @@ class TRIAGE(State):
             "user": user_prompt,
             "params": model_info.get("params", {})
         })
+        
+        # We don't have a JobPayload yet in TRIAGE, it's just a dict
+        # but record_interaction handles dicts if we pass it right? 
+        # Actually TRIAGE returns a JobPayload. 
+        # I'll create a temp trace or just skip TRIAGE for now as it's rarely the problem.
+        # Let's focus on DISPATCH and onwards where JobPayload exists.
 
         if status != "SUCCESS":
             return "ABORT", JobPayload(intent="Failed to triage")
@@ -112,6 +137,8 @@ class DISPATCH(State):
             "params": model_info.get("params", {}),
             "post_process": state_config.get("post_process")
         })
+        
+        record_interaction(job, "DISPATCH", system_prompt, user_prompt, test_code)
 
         if status != "SUCCESS":
             return "ABORT", job
@@ -326,6 +353,8 @@ class THINKING(State):
             "params": model_info.get("params", {}),
             "response_model": ThinkingResponse
         })
+        
+        record_interaction(job, "THINKING", state_config["system_prompt"], user_prompt, plan)
 
         if status != "SUCCESS":
             return "ROUTER", job
@@ -369,6 +398,8 @@ class ROUTER(State):
             "params": model_info.get("params", {}),
             "response_model": RouterResponse
         })
+        
+        record_interaction(job, "ROUTER", state_config["system_prompt"], user_prompt, decision)
 
         if status != "SUCCESS":
             logger.warning(f"Router received invalid response ({status}). Attempting recovery...")
@@ -535,6 +566,8 @@ class MAPS_NAV(State):
             "params": model_info.get("params", {}),
             "response_model": MapsNavResponse
         })
+        
+        record_interaction(job, "MAPS_NAV", state_config["system_prompt"], user_prompt, result)
 
         if status != "SUCCESS":
             job.llm_feedback = f"Failed to get structured navigation response: {result}"
@@ -638,6 +671,8 @@ class MAPS_THINK(State):
             "params": model_info.get("params", {}),
             "response_model": MapsThinkResponse
         })
+        
+        record_interaction(job, "MAPS_THINK", state_config["system_prompt"], user_prompt, result)
 
         if status != "SUCCESS":
             job.llm_feedback = f"Failed to get structured diagnosis: {result}"
@@ -691,6 +726,8 @@ class MAPS_SURGEON(State):
             "params": model_info.get("params", {}),
             "response_model": MapsSurgeonResponse
         })
+        
+        record_interaction(job, "MAPS_SURGEON", state_config["system_prompt"], user_prompt, result)
 
         if status != "SUCCESS":
             job.llm_feedback = f"Failed to get structured surgical command: {result}"
@@ -811,7 +848,7 @@ class ACTUATE(State):
 
 class POST_MORTEM(State):
     """
-    Summarizes the repair session results.
+    Summarizes the repair session results and generates optimization cases on failure.
     """
     def __init__(self, config_manager):
         super().__init__("POST_MORTEM")
@@ -819,4 +856,50 @@ class POST_MORTEM(State):
 
     def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
         logger.info("Repair session complete. summarized results.")
+        
+        # Self-Optimization Trigger: If we failed or had high retries
+        if (job.retry_count > 3 or job.llm_feedback) and job.interaction_history:
+            logger.info("High retry count or feedback detected. Generating self-optimization case...")
+            
+            model_info = self.config_manager.get_model_info("POST_MORTEM")
+            state_config = self.config_manager.config["states"]["POST_MORTEM"]
+            
+            # Format history for the LLM
+            history_str = ""
+            for i, trace in enumerate(job.interaction_history[-10:]): # Last 10 interactions
+                history_str += f"\n--- Interaction {i} ({trace.state}) ---\n"
+                history_str += f"System: {trace.system_prompt[:200]}...\n"
+                history_str += f"User: {trace.user_prompt[:500]}...\n"
+                history_str += f"Response: {trace.response[:500]}...\n"
+
+            user_prompt = self.config_manager.render_prompt(
+                state_config["user_prompt_template"],
+                {"history": history_str}
+            )
+
+            query = QueryLLM(model=model_info.get("model"), api_base=model_info.get("api_base"))
+            status, result = query.tick({
+                "system": state_config["system_prompt"],
+                "user": user_prompt,
+                "params": model_info.get("params", {}),
+                "response_model": SelfOptimizationResponse
+            })
+
+            if status == "SUCCESS":
+                case_file = "tests/llm_cases.json"
+                try:
+                    cases = []
+                    if os.path.exists(case_file):
+                        with open(case_file, "r") as f:
+                            cases = json.load(f)
+                    
+                    cases.append(result.model_dump())
+                    
+                    with open(case_file, "w") as f:
+                        json.dump(cases, f, indent=2)
+                    
+                    logger.info(f"Successfully recorded new optimization case to {case_file}")
+                except Exception as e:
+                    logger.error(f"Failed to save optimization case: {e}")
+
         return "FINISH", job
