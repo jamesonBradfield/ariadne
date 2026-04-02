@@ -88,3 +88,19 @@ This session overhauled the `MAPS` state into a deterministic surgical pipeline 
     *   Removed the redundant `DOCS` state; real-time LSP hover data is now the primary documentation source.
 
 **Next Steps**: Refine the Architect's (`THINKING`) ability to distinguish between `struct` and `impl` blocks in Rust to avoid structural navigation deadlocks.
+
+### **Pydantic Migration & Live Prompt Optimization**
+This session modernized Ariadne's data layer and implemented a real-time self-optimization loop using `textgrad`.
+
+1.  **Strict Data Layer (Pydantic)**:
+    *   Migrated `JobPayload` to a strict Pydantic `BaseModel`, eliminating "Payload Identity Crisis" and enabling dot-notation across all states.
+    *   Implemented native **Structured Outputs** via `litellm`, removing ~100 lines of manual JSON extraction and bracket-counting logic.
+2.  **Live Optimization Loop (`textgrad`)**:
+    *   Integrated `textgrad` directly into the execution flow. Critical states (`MAPS_NAV`, `MAPS_THINK`, `MAPS_SURGEON`) are now audited by a high-tier "Judge" model (via OpenRouter).
+    *   **Self-Healing Prompts**: If the Judge detects a logical error (e.g., trying to navigate `up` from the root), Ariadne generates a "Textual Gradient," immediately updates `ariadne_config.json`, and retries the turn.
+3.  **Automatic Eval Generation**:
+    *   The `POST_MORTEM` state now automatically captures failing interactions and appends them to `tests/llm_cases.json`. Ariadne now writes her own regression tests based on her mistakes.
+4.  **AST Pattern Matching (`ast-grep`)**:
+    *   Integrated `ast-grep-py` to replace legacy Tree-sitter query strings with intuitive, pattern-based symbol identification (`fn $NAME(...) { $$$ }`).
+
+**Next Steps**: Battle-test the Live Optimization loop on complex Godot-Rust refactors and verify the `ast-grep` migration for Python.

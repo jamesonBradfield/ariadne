@@ -18,6 +18,77 @@ from .components import TreeSitterSensor
 
 logger = logging.getLogger("ariadne.states")
 
+def optimize_state_prompt(config_manager, state_name: str, user_prompt: str, prediction: Any):
+    """
+    Uses a strong Judge model (via OpenRouter) to evaluate a prediction.
+    If incorrect, it backpropagates feedback to the system prompt and updates the config.
+    """
+    import os
+    import textgrad as tg
+    from textgrad.engine_experimental.litellm import LiteLLMEngine
+    
+    or_key = os.getenv("OPENROUTER_API_KEY")
+    if not or_key:
+        return False
+        
+    logger.info(f"Live Optimization: Judging {state_name} output...")
+    
+    # 1. Setup Judge
+    os.environ["OPENROUTER_API_KEY"] = or_key
+    judge_engine = LiteLLMEngine(model_string="openrouter/qwen/qwen-plus")
+    tg.set_backward_engine(judge_engine, override=True) # CRITICAL: Set global backward engine
+    
+    # 2. Setup Variables
+    state_config = config_manager.config["states"][state_name]
+    system_prompt_var = tg.Variable(
+        state_config["system_prompt"],
+        role_description="The system prompt for " + state_name,
+        requires_grad=True
+    )
+    
+    pred_val = prediction.model_dump_json() if hasattr(prediction, "model_dump_json") else str(prediction)
+    prediction_var = tg.Variable(pred_val, role_description="The model's prediction")
+    
+    # 3. Define Evaluation Instruction (Strict and Concise)
+    eval_instruction = (
+        f"You are a Surgical Quality Judge. Evaluate this {state_name} response.\n"
+        "Criteria for INCORRECT:\n"
+        "- Navigating 'up' when already at the root/anchor.\n"
+        "- Aborting when a fix is possible using the current node as an anchor.\n"
+        "- Using byte ranges (e.g. '123-456') as target_id instead of short IDs (e.g. 'self', '0').\n"
+        "- Choosing a Struct root when an 'impl' block or existing method is available.\n\n"
+        "VERDICT: Start your response with 'CORRECT' or 'INCORRECT'. If INCORRECT, provide a 1-sentence gradient feedback."
+    )
+    
+    evaluator = tg.TextLoss(eval_system_prompt=eval_instruction, engine=judge_engine)
+    
+    # 4. Backward Pass
+    loss = evaluator(prediction_var)
+    
+    # Optimization condition: ONLY if judge explicitly says INCORRECT
+    if loss.value.strip().upper().startswith("INCORRECT"):
+        logger.warning(f"Live Optimization: Judge found a flaw! Feedback: {loss.value}")
+        optimizer = tg.TGD(parameters=[system_prompt_var], engine=judge_engine)
+        loss.backward()
+        optimizer.step()
+        
+        # Update Config
+        new_prompt = system_prompt_var.value
+        config_manager.config["states"][state_name]["system_prompt"] = new_prompt
+        
+        # Persist to disk
+        config_path = getattr(config_manager, "config_path", "ariadne_config.json")
+        try:
+            with open(config_path, "w") as f:
+                json.dump(config_manager.config, f, indent=2)
+            logger.info(f"Live Optimization: Updated system prompt for {state_name} on disk.")
+        except Exception as e:
+            logger.error(f"Failed to persist optimized prompt: {e}")
+        
+        return True # Prompt was optimized
+    
+    return False
+
 def record_interaction(job: JobPayload, state: str, system: str, user: str, response: Any):
     """Logs an LLM interaction to the job history for self-optimization."""
     from .payloads import InteractionTrace
@@ -569,15 +640,30 @@ class MAPS_NAV(State):
         
         record_interaction(job, "MAPS_NAV", state_config["system_prompt"], user_prompt, result)
 
+        # LIVE OPTIMIZATION: Check if the judge wants to refine the prompt
+        if optimize_state_prompt(self.config_manager, "MAPS_NAV", user_prompt, result):
+            # Prompt was updated, clear feedback and retry this specific tick with the new prompt
+            job.llm_feedback = "The engine's internal rules have been updated to prevent a logical error. Retrying..."
+            return "MAPS_NAV", job
+
         if status != "SUCCESS":
             job.llm_feedback = f"Failed to get structured navigation response: {result}"
             return "ROUTER", job
 
         action = result.action
-        target_id = result.target_id
+        target_id = str(result.target_id)
         
+        # Fuzzy ID Resolution: If the LLM sent a byte range like "123-456" instead of a short ID
+        if target_id not in id_map:
+            for sid, (start, end) in id_map.items():
+                range_str = f"{start}-{end}"
+                if target_id == range_str:
+                    logger.info(f"Fuzzy resolved byte-range '{target_id}' to short ID '{sid}'")
+                    target_id = sid
+                    break
+
         if action == "zoom":
-            if target_id is not None and str(target_id) in id_map:
+            if target_id in id_map:
                 new_range = id_map[str(target_id)]
                 if new_range == (start_byte, end_byte):
                     job.llm_feedback = f"You are already focused on node '{target_id}'. To move deeper, zoom into a child ID (0, 1, 2, etc.)."
@@ -674,6 +760,11 @@ class MAPS_THINK(State):
         
         record_interaction(job, "MAPS_THINK", state_config["system_prompt"], user_prompt, result)
 
+        # LIVE OPTIMIZATION
+        if optimize_state_prompt(self.config_manager, "MAPS_THINK", user_prompt, result):
+            job.llm_feedback = "Logical error detected in plan. Retrying with refined rules..."
+            return "MAPS_THINK", job
+
         if status != "SUCCESS":
             job.llm_feedback = f"Failed to get structured diagnosis: {result}"
             return "ROUTER", job
@@ -728,6 +819,11 @@ class MAPS_SURGEON(State):
         })
         
         record_interaction(job, "MAPS_SURGEON", state_config["system_prompt"], user_prompt, result)
+
+        # LIVE OPTIMIZATION
+        if optimize_state_prompt(self.config_manager, "MAPS_SURGEON", user_prompt, result):
+            job.llm_feedback = "Surgical formatting error detected. Retrying with refined rules..."
+            return "MAPS_SURGEON", job
 
         if status != "SUCCESS":
             job.llm_feedback = f"Failed to get structured surgical command: {result}"

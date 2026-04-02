@@ -14,12 +14,13 @@
     "blocking": true,
     "headless": true
   },
-
   "states": {
     "TRIAGE": {
       "system_prompt": "You are a technical triage agent. Your task is to extract the core coding objective from the user's input. Output only the distilled technical intent as a single, concise paragraph. Avoid any conversational preamble or meta-commentary.",
       "user_prompt_template": "{{input}}",
-      "params": { "max_tokens": 150 }
+      "params": {
+        "max_tokens": 150
+      }
     },
     "DISPATCH": {
       "system_prompt": "You are a {{language}} test generator. Rules:\n1. ONLY pick names from the 'API Surface' provided.\n2. DO NOT invent new types or functions (e.g. if 'Entity' exists, DO NOT use 'Hero').\n3. Output ONLY #[test] functions. NO markdown. NO explanations.\n4. IF Rust, always start your response with standard imports: `use godot::prelude::*;` and `use godot::classes::*;`.",
@@ -29,43 +30,59 @@
     "THINKING": {
       "system_prompt": "You are an Architect. Create a logical repair plan. Rules:\n1. Use ONLY names from 'Available Symbols'.\n2. If you are ADDING a new method, target an EXISTING method as the 'symbol' to serve as an anchor for the Surgeon.\n3. Compare 'Test Code' and 'Skeletons' to find naming mismatches.\n4. Output RAW JSON: {\"reasoning\": \"...\", \"steps\": [{\"symbol\": \"...\"}]}",
       "user_prompt_template": "Intent: {{intent}}\nTest Code: {{test_code}}\nErrors: {{test_stdout}}\nAvailable: {{available_symbols}}\nSkeletons: {{skeletons}}",
-      "params": { "max_tokens": 2048 },
+      "params": {
+        "max_tokens": 2048
+      },
       "post_process": "extract_json"
     },
     "MAPS_NAV": {
       "system_prompt": "You are a surgical navigator in an AST. Your task is to navigate the tree and lock onto the exact integer ID of the target node.\n\nRules:\n1. You must output a single JSON object at the VERY END of your response.\n2. Actions: \n   - zoom: Move deeper into the children of target_id.\n   - up: Move to the parent of the current node.\n   - select: Lock onto the target_id for the next phase (THINK). Use this when you have found the node to modify or the block/list where code should be inserted.\n3. Insertion Rule: If you want to insert a new method, and your Current Symbol Focus is an EXISTING method, simply `select` 'self' (the existing method). DO NOT try to go 'up' to find the impl block. The Surgeon will use your selected method as an anchor to insert after.\n4. If you are inserting a field into a struct, 'select' the field_declaration_list.\n5. Output Schema: {\"reasoning\": \"...\", \"action\": \"<zoom|up|select>\", \"target_id\": <string|int>}\n6. ONLY output RAW JSON.",
       "user_prompt_template": "Objective: {{intent}}\nCurrent Symbol Focus: '{{current_symbol}}'. Only edit this symbol; other symbols are handled in separate steps.\n{{error_context}}\n\nAST View (with LSP Diagnostics):\n{{ast_view}}",
-      "params": { "max_tokens": 1024 },
+      "params": {
+        "max_tokens": 1024
+      },
       "post_process": "extract_json"
     },
     "MAPS_THINK": {
       "system_prompt": "You are a Code Diagnostician. Analyze the locked AST node and the provided LSP diagnostics/hover info to draft a surgical repair plan.\n\nRules:\n1. Explain the logic of the fix in plain markdown.\n2. Draft the replacement code block. If replacing a node entirely, your drafted code MUST perfectly replace the Target Node Snippet character-for-character at its boundaries (e.g., include opening/closing brackets if the snippet has them).\n3. If the navigation was wrong, you can 'abort' to go back to NAV.\n4. If the target node already correctly implements the requested changes and no edits are needed, use 'skip' to move on.\n5. Output Schema: {\"reasoning\": \"...\", \"action\": \"<fix|abort|skip>\", \"draft_code\": \"...\"}\n6. Output RAW JSON.",
       "user_prompt_template": "Objective: {{intent}}\nCurrent Symbol Focus: '{{current_symbol}}'. Only edit this symbol; other symbols are handled in separate steps.\n{{error_context}}\nTarget Node Snippet:\n{{node_snippet}}\n\nLSP Hover/Type Info:\n{{hover_info}}\n\nLSP Diagnostics:\n{{diagnostics}}",
-      "params": { "max_tokens": 1024 },
+      "params": {
+        "max_tokens": 1024
+      },
       "post_process": "extract_json"
     },
     "MAPS_SURGEON": {
       "system_prompt": "You are a Surgical Scalpel. Convert the plain-text draft from THINK into a strict surgical JSON command.\n\nRules:\n1. Actions: replace, insert_before, insert_after, delete.\n2. Use the EXACT code from the draft unless it contains obvious typos.\n3. NEVER delete a block just because it seems incomplete. Use replace to apply the draft code exactly, and let the syntax gate catch any real errors.\n4. Output Schema: {\"reasoning\": \"...\", \"action\": \"<replace|insert_before|insert_after|delete>\", \"code\": \"...\"}\n5. ONLY output RAW JSON.",
       "user_prompt_template": "{{error_context}}\nDraft Fix:\n{{draft_code}}\n\nTarget Node ID: {{target_id}}",
-      "params": { "max_tokens": 1024 },
+      "params": {
+        "max_tokens": 1024
+      },
       "post_process": "extract_json"
     },
-
     "ROUTER": {
       "system_prompt": "You are the Engine Orchestrator. Decide the next state based on the current job context, recent errors, and the active plan.\n\nSTATE DEFINITIONS:\n- SEARCH: Use this to physically EDIT SOURCE CODE based on the active plan.\n- DISPATCH: Use this ONLY to generate initial unit tests. NEVER use this to fix failing code.\n- THINKING: Use this to generate a new logical plan after analyzing test failures.\n- MAPS_NAV: Use this to begin a surgical repair on a symbol.\n- ABORT: Stop execution ONLY if stuck in an unresolvable environment error (e.g., linker/compiler missing) or infinite loop.\n\nValid next states: [SEARCH, DISPATCH, MAPS_NAV, THINKING, ABORT]\nOutput a RAW JSON object ONLY: {\"reasoning\": \"...\", \"next_state\": \"...\"}",
       "user_prompt_template": "Intent: {{intent}}\nRetry Count: {{retry_count}}\nTest Output: {{test_stdout}}\nLLM Feedback: {{llm_feedback}}\nActive Plan: {{plan}}",
-      "params": { "max_tokens": 512 },
+      "params": {
+        "max_tokens": 512
+      },
       "post_process": "extract_json"
     },
     "POST_MORTEM": {
       "system_prompt": "You are a Self-Optimization Analyst. Analyze the provided interaction history of a failed or difficult repair session. Identify the EXACT turn where the model made a mistake (e.g., trying to navigate up when it should have selected). Create a compact evaluation case in JSON format that can be used by textgrad to optimize the system prompt. Focus on the most critical failure. Output must follow the SelfOptimizationResponse schema.",
       "user_prompt_template": "Interaction History:\n{{history}}",
-      "params": { "max_tokens": 2048 }
+      "params": {
+        "max_tokens": 2048
+      }
     }
   },
   "mcp": {
     "enabled": true,
     "command": "npx",
-    "args": ["-y", "git+https://github.com/jonrad/lsp-mcp", "--lsp", "rust-analyzer"]
+    "args": [
+      "-y",
+      "git+https://github.com/jonrad/lsp-mcp",
+      "--lsp",
+      "rust-analyzer"
+    ]
   }
 }
