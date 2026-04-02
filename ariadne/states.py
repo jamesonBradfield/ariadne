@@ -399,14 +399,14 @@ class SEARCH(State):
     def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
         logger.info("Preparing Surgeon work list...")
         
-        if not job.plan or "steps" not in job.plan:
+        if not job.plan or not getattr(job.plan, "steps", None):
             logger.error("No plan steps found in SEARCH state.")
             return "THINKING", job
 
         # NEW: Initialize the surgeon loop state
         job.maps_state = {
             "current_step_index": 0,
-            "steps": job.plan["steps"]
+            "steps": [step.model_dump() for step in job.plan.steps]
         }
         job.extracted_nodes = [] # Clear previous sense results
         
@@ -465,19 +465,6 @@ class SENSE(State):
         return "MAPS_NAV", job
 
 
-def find_project_root(target_files: List[str]) -> Optional[str]:
-    """Heuristic to find the project root (where Cargo.toml or similar lives)."""
-    if not target_files: return None
-    
-    # Check first target file
-    current = os.path.dirname(os.path.abspath(target_files[0]))
-    while current != os.path.dirname(current):
-        if os.path.exists(os.path.join(current, "Cargo.toml")) or \
-           os.path.exists(os.path.join(current, "package.json")):
-            return current
-        current = os.path.dirname(current)
-    return None
-
 _lsp_manager = None
 
 def get_lsp_manager(config_manager, job: Optional[JobPayload] = None):
@@ -485,10 +472,7 @@ def get_lsp_manager(config_manager, job: Optional[JobPayload] = None):
     if _lsp_manager is None:
         mcp_cfg = config_manager.config.get("mcp", {})
         if mcp_cfg.get("enabled", False):
-            cwd = None
-            if job and job.target_files:
-                cwd = find_project_root(job.target_files)
-            _lsp_manager = LSPManager(mcp_cfg.get("command"), mcp_cfg.get("args", []), cwd=cwd)
+            _lsp_manager = LSPManager(mcp_cfg.get("command"), mcp_cfg.get("args", []), cwd=os.getcwd())
     return _lsp_manager
 
 class MAPS_NAV(State):

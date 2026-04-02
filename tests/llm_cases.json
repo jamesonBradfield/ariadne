@@ -1,0 +1,36 @@
+[
+  {
+    "id": "nav_anchor_loop",
+    "state": "MAPS_NAV",
+    "intent": "Add a method get_total_cameras",
+    "current_symbol": "get_cubemap_rid",
+    "error_context": "PREVIOUS ATTEMPT FAILED:\nYou are already focused on node 'self'. To move deeper, zoom into a child ID (0, 1, 2, etc.).",
+    "ast_view": "Current Node [ID: self]: function_item [2464-2535]\n [ID: parent] declaration_list (Back)\n [ID: 0] visibility_modifier: \"pub\"\n [ID: 1] identifier: \"get_cubemap_rid\"",
+    "expected_action": "select",
+    "expected_target_id": "self",
+    "anti_expected_action": "up"
+  },
+  {
+    "id": "think_anchor_abort",
+    "state": "MAPS_THINK",
+    "intent": "Add a method get_total_cameras",
+    "current_symbol": "get_cubemap_rid",
+    "error_context": "",
+    "node_snippet": "pub fn get_cubemap_rid(&self) -> Rid {\n        self.cubemap_rid\n    }",
+    "hover_info": "No hover data.",
+    "diagnostics": "No LSP data.",
+    "expected_action": "fix",
+    "anti_expected_action": "abort"
+  },
+  {
+    "id": "thinking_container_trap",
+    "state": "THINKING",
+    "intent": "Add a method get_total_cameras to RealtimeProbe",
+    "test_code": "let mut probe = RealtimeProbe::new();\nlet total = probe.get_total_cameras();",
+    "test_stdout": "error[E0599]: no method named `get_total_cameras` found for struct `RealtimeProbe`",
+    "available_symbols": "[\"is_ready\", \"init\", \"RealtimeProbe\", \"process\", \"get_cubemap_rid\"]",
+    "skeletons": "pub struct RealtimeProbe { ... }\nimpl RealtimeProbe {\n  pub fn get_cubemap_rid(&self) -> Rid { ... }\n}",
+    "expected_symbol_target": "get_cubemap_rid",
+    "anti_expected_symbol_target": "RealtimeProbe"
+  }
+]

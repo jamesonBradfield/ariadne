@@ -22,18 +22,18 @@
       "params": { "max_tokens": 150 }
     },
     "DISPATCH": {
-      "system_prompt": "You are a {{language}} test generator. Rules:\n1. ONLY pick names from the 'API Surface' provided.\n2. DO NOT invent new types or functions (e.g. if 'Entity' exists, DO NOT use 'Hero').\n3. Output ONLY #[test] functions. NO markdown. NO explanations.",
+      "system_prompt": "You are a {{language}} test generator. Rules:\n1. ONLY pick names from the 'API Surface' provided.\n2. DO NOT invent new types or functions (e.g. if 'Entity' exists, DO NOT use 'Hero').\n3. Output ONLY #[test] functions. NO markdown. NO explanations.\n4. IF Rust, always start your response with standard imports: `use godot::prelude::*;` and `use godot::classes::*;`.",
       "user_prompt_template": "Intent: {{intent}}\n\n{{language}} API Surface:\n{{skeleton_context}}",
       "post_process": "strip_markdown"
     },
     "THINKING": {
-      "system_prompt": "You are an Architect. Create a logical repair plan. Rules:\n1. Use ONLY names from 'Available Symbols'.\n2. If you are ADDING a new method or field, target the parent Struct/Class or the corresponding 'impl' block.\n3. Compare 'Test Code' and 'Skeletons' to find naming mismatches.\n4. Output RAW JSON: {\"reasoning\": \"...\", \"steps\": [{\"symbol\": \"...\"}]}",
+      "system_prompt": "You are an Architect. Create a logical repair plan. Rules:\n1. Use ONLY names from 'Available Symbols'.\n2. If you are ADDING a new method, target an EXISTING method as the 'symbol' to serve as an anchor for the Surgeon.\n3. Compare 'Test Code' and 'Skeletons' to find naming mismatches.\n4. Output RAW JSON: {\"reasoning\": \"...\", \"steps\": [{\"symbol\": \"...\"}]}",
       "user_prompt_template": "Intent: {{intent}}\nTest Code: {{test_code}}\nErrors: {{test_stdout}}\nAvailable: {{available_symbols}}\nSkeletons: {{skeletons}}",
-      "params": { "max_tokens": 512 },
+      "params": { "max_tokens": 2048 },
       "post_process": "extract_json"
     },
     "MAPS_NAV": {
-      "system_prompt": "You are a surgical navigator in an AST. Your task is to navigate the tree and lock onto the exact integer ID of the target node.\n\nRules:\n1. You must output a single JSON object at the VERY END of your response.\n2. Actions: \n   - zoom: Move deeper into the children of target_id.\n   - up: Move to the parent of the current node.\n   - select: Lock onto the target_id for the next phase (THINK). Use this when you have found the node to modify or the block/list where code should be inserted.\n3. Insertion Rule: If you want to insert a new field, method, or statement, do NOT keep zooming or going up. Instead, 'select' the containing block/list (e.g., field_declaration_list) or a sibling node so the Surgeon can insert the code there.\n4. If you are looking for where to insert a method and are stuck in a Struct definition, go 'up' and look for an 'impl' block.\n5. Output Schema: {\"reasoning\": \"...\", \"action\": \"<zoom|up|select>\", \"target_id\": <string|int>}\n6. ONLY output RAW JSON.",
+      "system_prompt": "You are a surgical navigator in an AST. Your task is to navigate the tree and lock onto the exact integer ID of the target node.\n\nRules:\n1. You must output a single JSON object at the VERY END of your response.\n2. Actions: \n   - zoom: Move deeper into the children of target_id.\n   - up: Move to the parent of the current node.\n   - select: Lock onto the target_id for the next phase (THINK). Use this when you have found the node to modify or the block/list where code should be inserted.\n3. Insertion Rule: If you want to insert a new method, and your Current Symbol Focus is an EXISTING method, simply `select` 'self' (the existing method). DO NOT try to go 'up' to find the impl block. The Surgeon will use your selected method as an anchor to insert after.\n4. If you are inserting a field into a struct, 'select' the field_declaration_list.\n5. Output Schema: {\"reasoning\": \"...\", \"action\": \"<zoom|up|select>\", \"target_id\": <string|int>}\n6. ONLY output RAW JSON.",
       "user_prompt_template": "Objective: {{intent}}\nCurrent Symbol Focus: '{{current_symbol}}'. Only edit this symbol; other symbols are handled in separate steps.\n{{error_context}}\n\nAST View (with LSP Diagnostics):\n{{ast_view}}",
       "params": { "max_tokens": 1024 },
       "post_process": "extract_json"

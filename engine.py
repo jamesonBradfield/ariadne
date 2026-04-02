@@ -233,12 +233,20 @@ def main():
     parser.add_argument("--initial-state", default="INTERVENE", help="The starting state for the engine")
     parser.add_argument("--tui", action="store_true", help="Enable the Textual Dashboard TUI")
     parser.add_argument("--headless", action="store_true", help="Run without interactive editor interventions")
+    parser.add_argument("--project-dir", "-C", default=".", help="Set the project working directory")
     args = parser.parse_args()
 
     setup_logging(args.log_level, args.tui)
 
+    # Resolve config path before changing directory
+    config_path = os.path.abspath(args.config)
+
+    if args.project_dir and args.project_dir != ".":
+        os.chdir(args.project_dir)
+        logging.getLogger("ariadne").info(f"Changed project working directory to: {args.project_dir}")
+
     # 1. Load Configuration and Profile
-    config_manager = ConfigManager(args.config)
+    config_manager = ConfigManager(config_path)
     profile = ProfileLoader.load_profile(args.profile)
     
     # Inject headless arg into config
@@ -259,6 +267,10 @@ def main():
 
     # 3. Registry Creation Helper
     def create_states(target_files_list: List[str]):
+        engine_root = os.path.dirname(os.path.abspath(__file__))
+        rust_test_script = os.path.join(engine_root, "scripts", "run_rust_tests.py")
+        python_test_script = os.path.join(engine_root, "scripts", "run_python_tests.py")
+
         return {
             "TRIAGE": TRIAGE(config_manager),
             "DISPATCH": DISPATCH(
@@ -268,9 +280,9 @@ def main():
                 target_files=target_files_list
             ),
             "EVALUATE": EVALUATE(
-                test_command=f"python scripts/run_rust_tests.py {target_files_list[0]} test_contract{profile.extensions[0]}" 
+                test_command=f"python {rust_test_script} {target_files_list[0]} test_contract{profile.extensions[0]}" 
                 if target_files_list and profile.name == "Rust" else 
-                f"python scripts/run_python_tests.py {target_files_list[0]} test_contract{profile.extensions[0]}"
+                f"python {python_test_script} {target_files_list[0]} test_contract{profile.extensions[0]}"
                 if target_files_list else "echo No targets provided"
             ),
             "THINKING": THINKING(config_manager, profile),

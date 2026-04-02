@@ -4,3 +4,4 @@ pyperclip
 mcp
 ast-grep-py
 pydantic
+textgrad
