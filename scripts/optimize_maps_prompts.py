@@ -16,15 +16,26 @@ def load_cases():
         return json.load(f)
 
 def optimize():
-    # Setup TextGrad engine using LiteLLM/OpenAI compatible local or remote server
-    # We will use the config's model if possible, but for textgrad we might need a strong judge
-    # Assuming textgrad works with litellm setup
-    tg.set_backward_engine("gpt-4o", override=True) # Use a strong model for backprop/gradients if available, or fall back
-    
     config = load_config()
     cases = load_cases()
-
-    print("Running TextGrad Optimization on MAPS Prompts...")
+    
+    # 1. Setup local TextGrad engine using Ariadne's configuration
+    default_cfg = config.get("default", {})
+    api_base = default_cfg.get("api_base", "http://localhost:8080/v1")
+    model_name = default_cfg.get("model", "openai/llama-cpp")
+    
+    # TextGrad uses litellm internally. We configure it via ChatExternalClient
+    # to target our local llama-cpp endpoint.
+    engine = tg.engines.ChatExternalClient(
+        model_string=model_name,
+        base_url=api_base,
+        api_key="none"
+    )
+    
+    # Set the local engine for both forward and backward passes
+    tg.set_backward_engine(engine, override=True)
+    
+    print(f"Running TextGrad Optimization using Local Endpoint: {api_base} ({model_name})")
 
     for case in cases:
         state_name = case["state"]
@@ -42,20 +53,18 @@ def optimize():
         # We construct the input for the specific state
         user_prompt_template = state_config["user_prompt_template"]
         
-        # Simple template rendering
         user_prompt_text = user_prompt_template
         for key, value in case.items():
             if f"{{{{{key}}}}}" in user_prompt_text:
                 user_prompt_text = user_prompt_text.replace(f"{{{{{key}}}}}", str(value))
                 
-        # Handle cases where error_context isn't replaced because it's not in the case dict directly as a template key sometimes
         if "{{error_context}}" in user_prompt_text:
             user_prompt_text = user_prompt_text.replace("{{error_context}}", case.get("error_context", ""))
 
         input_var = tg.Variable(user_prompt_text, role_description="The current state of the AST and user intent")
 
-        # The model we are evaluating
-        model = tg.BlackboxLLM(engine=tg.get_engine("gpt-4o")) # Ideally we use the target model, but for optimization gpt-4o is standard
+        # Use local engine for the model
+        model = tg.BlackboxLLM(engine=engine)
 
         # Forward pass
         prediction = model(tg.messages.chat([
@@ -65,13 +74,14 @@ def optimize():
 
         print(f"Prediction: {prediction.value}")
 
-        # Define the evaluation criteria based on expected vs anti-expected
+        # Define the evaluation criteria
         expected = case.get("expected_action") or case.get("expected_symbol_target")
         anti_expected = case.get("anti_expected_action") or case.get("anti_expected_symbol_target")
 
         eval_instruction = f"Evaluate if the prediction correctly chooses the action or target '{expected}'. It MUST NOT choose '{anti_expected}'. If it chose the wrong one, provide a gradient to fix the system prompt to explicitly forbid that failure mode."
         
-        evaluator = tg.LLMEvaluator(eval_instruction=eval_instruction, engine=tg.get_engine("gpt-4o"))
+        # Use local engine for evaluator
+        evaluator = tg.LLMEvaluator(eval_instruction=eval_instruction, engine=engine)
         
         loss = evaluator(prediction)
         print(f"Loss/Feedback: {loss.value}")
