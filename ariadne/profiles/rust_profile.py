@@ -1,5 +1,5 @@
 import tree_sitter_rust as tsrust
-from typing import Any, List, Dict
+from typing import Any, List, Dict, Tuple
 from .base import BaseProfile
 
 class RustProfile(BaseProfile):
@@ -15,6 +15,10 @@ class RustProfile(BaseProfile):
     def extensions(self) -> List[str]:
         return [".rs"]
 
+    def get_standard_headers(self) -> str:
+        """Inject godot-rust headers for testing."""
+        return "use godot::prelude::*;\n"
+
     def get_language_ptr(self) -> Any:
         return tsrust.language()
 
@@ -28,10 +32,22 @@ class RustProfile(BaseProfile):
         """
         return [
             f"fn {symbol_name}($$$) {{ $$$ }}",
+            f"fn {symbol_name}($$$) -> $$$ {{ $$$ }}",
             f"struct {symbol_name} {{ $$$ }}",
             f"struct {symbol_name}($$$);",
             f"impl {symbol_name} {{ $$$ }}",
             f"impl $$$ for {symbol_name} {{ $$$ }}"
+        ]
+
+    def get_all_symbols_patterns(self) -> List[Tuple[str, str]]:
+        """
+        Patterns to find all functions and structs.
+        """
+        return [
+            ("fn $NAME($$$) { $$$ }", "$NAME"),
+            ("fn $NAME($$$) -> $$$ { $$$ }", "$NAME"),
+            ("struct $NAME { $$$ }", "$NAME"),
+            ("impl $NAME { $$$ }", "$NAME")
         ]
 
     def get_skeleton_query(self) -> str:
@@ -66,23 +82,3 @@ class RustProfile(BaseProfile):
     @property
     def symbol_capture_name(self) -> str:
         return "symbol"
-
-    def get_available_symbols(self, filepaths: List[str]) -> List[str]:
-        """
-        Extracts all function and struct names from the target files.
-        """
-        query = """
-        (function_item name: (identifier) @name)
-        (struct_item name: (type_identifier) @name)
-        (impl_item type: (type_identifier) @name)
-        """
-        symbols = []
-        for path in filepaths:
-            try:
-                with open(path, "rb") as f:
-                    source = f.read()
-                nodes = self.sensor.query_nodes(source, query, "name")
-                symbols.extend([n["code"] for n in nodes])
-            except Exception:
-                continue
-        return list(set(symbols))

@@ -47,16 +47,30 @@ class QueryAstGrep(State):
                 # Simple pattern search
                 found = root.root().find_all(pattern=pattern)
 
+            requested_vars = payload.get("vars", [])
+
             for node in found:
                 range_info = node.range()
-                matches.append({
+                match_data = {
                     "text": node.text(),
-                    "start_byte": range_info.start.byte,
-                    "end_byte": range_info.end.byte,
+                    "start_byte": range_info.start.index,
+                    "end_byte": range_info.end.index,
                     "start_line": range_info.start.line,
                     "start_col": range_info.start.column,
                     "node_type": node.kind()
-                })
+                }
+                
+                if requested_vars:
+                    vars_data = {}
+                    for v in requested_vars:
+                        # ast-grep meta-vars in patterns are like $NAME, but get_match takes "NAME"
+                        var_key = v.lstrip("$")
+                        matched_node = node.get_match(var_key)
+                        if matched_node:
+                            vars_data[v] = matched_node.text()
+                    match_data["vars"] = vars_data
+
+                matches.append(match_data)
 
             return "SUCCESS", matches
         except Exception as e:

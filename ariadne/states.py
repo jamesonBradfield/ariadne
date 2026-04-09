@@ -6,7 +6,7 @@ import tempfile
 import re
 import json
 import threading
-from typing import Any, Tuple, Dict, List, Optional
+from typing import Any, Tuple, Dict, List, Optional, Union
 from .core import State
 from .payloads import (
     JobPayload, RouterResponse, ThinkingResponse, 
@@ -49,14 +49,18 @@ def optimize_state_prompt(config_manager, state_name: str, user_prompt: str, pre
     pred_val = prediction.model_dump_json() if hasattr(prediction, "model_dump_json") else str(prediction)
     prediction_var = tg.Variable(pred_val, role_description="The model's prediction")
     
-    # 3. Define Evaluation Instruction (Strict and Concise)
+    # 3. Define Evaluation Instruction (Balanced and Logical)
     eval_instruction = (
         f"You are a Surgical Quality Judge. Evaluate this {state_name} response.\n"
-        "Criteria for INCORRECT:\n"
-        "- Navigating 'up' when already at the root/anchor.\n"
-        "- Aborting when a fix is possible using the current node as an anchor.\n"
-        "- Using byte ranges (e.g. '123-456') as target_id instead of short IDs (e.g. 'self', '0').\n"
-        "- Choosing a Struct root when an 'impl' block or existing method is available.\n\n"
+        "A response is CORRECT if it:\n"
+        "- Progresses toward the user's intent logically.\n"
+        "- Follows the Anchor Protocol: Uses an existing method as a base for inserting new code.\n"
+        "- Uses short IDs (e.g. 'self', '0', '1') for target_id.\n\n"
+        "A response is INCORRECT if it:\n"
+        "- Loops infinitely between the same two nodes.\n"
+        "- Navigates 'up' past the root of the current symbol.\n"
+        "- Uses byte ranges as target_id instead of short IDs.\n"
+        "- Aborts when the current node is clearly the intended anchor or target.\n\n"
         "VERDICT: Start your response with 'CORRECT' or 'INCORRECT'. If INCORRECT, provide a 1-sentence gradient feedback."
     )
     
@@ -116,16 +120,21 @@ class TRIAGE(State):
         super().__init__("TRIAGE")
         self.config_manager = config_manager
 
-    def tick(self, payload: Dict[str, Any]) -> Tuple[str, JobPayload]:
+    def tick(self, payload: Union[JobPayload, Dict[str, Any]]) -> Tuple[str, JobPayload]:
         logger.info("Triaging intent...")
         
+        # Normalize to dict for easy access if needed
+        is_job = hasattr(payload, "intent")
+        intent_val = payload.intent if is_job else payload.get("intent", "")
+        input_val = intent_val or (payload.get("input", "") if not is_job else "")
+
         model_info = self.config_manager.get_model_info("TRIAGE")
         state_config = self.config_manager.config["states"]["TRIAGE"]
         
         system_prompt = state_config["system_prompt"]
         user_prompt = self.config_manager.render_prompt(
             state_config["user_prompt_template"],
-            {"input": payload.get("input", "") or payload.get("intent", "")}
+            {"input": input_val}
         )
 
         query = QueryLLM(model=model_info.get("model"), api_base=model_info.get("api_base"))
@@ -134,21 +143,20 @@ class TRIAGE(State):
             "user": user_prompt,
             "params": model_info.get("params", {})
         })
-        
-        # We don't have a JobPayload yet in TRIAGE, it's just a dict
-        # but record_interaction handles dicts if we pass it right? 
-        # Actually TRIAGE returns a JobPayload. 
-        # I'll create a temp trace or just skip TRIAGE for now as it's rarely the problem.
-        # Let's focus on DISPATCH and onwards where JobPayload exists.
 
         if status != "SUCCESS":
-            return "ABORT", JobPayload(intent="Failed to triage")
+             # Error handling
+             return "ABORT", (payload if is_job else JobPayload(intent="Failed to triage"))
 
         # Handle LLM refusals
         if "I cannot" in technical_intent or "I am an AI" in technical_intent:
             logger.error("LLM refused to triage the intent. Check prompts or model safety settings.")
-            return "ABORT", JobPayload(intent=f"LLM Refusal: {technical_intent}")
+            return "ABORT", (payload if is_job else JobPayload(intent=f"LLM Refusal: {technical_intent}"))
 
+        if is_job:
+            payload.intent = technical_intent.strip()
+            return "DISPATCH", payload
+        
         job = JobPayload(
             intent=technical_intent.strip(),
             target_files=payload.get("target_files", [])
@@ -209,6 +217,11 @@ class DISPATCH(State):
             "post_process": state_config.get("post_process")
         })
         
+        # Inject standard headers
+        standard_headers = self.profile.get_standard_headers()
+        if standard_headers and standard_headers not in test_code:
+            test_code = f"{standard_headers}\n{test_code}"
+
         record_interaction(job, "DISPATCH", system_prompt, user_prompt, test_code)
 
         if status != "SUCCESS":
@@ -303,7 +316,19 @@ class INTERVENE(State):
         else:
             subprocess.run(shlex.split(command))
 
-    def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
+    def tick(self, payload: Union[JobPayload, Dict[str, Any]]) -> Tuple[str, JobPayload]:
+        # Normalize to JobPayload if it's a dict (initial state scenario)
+        if isinstance(payload, dict):
+            job = JobPayload(
+                intent=payload.get("intent", ""),
+                target_files=payload.get("target_files", []),
+                needs_elaboration=payload.get("needs_elaboration", False),
+                next_headless_state=payload.get("next_headless_state", "ROUTER"),
+                app=payload.get("app")
+            )
+        else:
+            job = payload
+
         editor_cfg = self.config_manager.config.get("editor", {})
         headless = editor_cfg.get("headless", False)
         rpc_template = editor_cfg.get("rpc_command_template")
@@ -426,6 +451,11 @@ class THINKING(State):
         })
         
         record_interaction(job, "THINKING", state_config["system_prompt"], user_prompt, plan)
+
+        # LIVE OPTIMIZATION: Catch "Struct-Traps" early
+        if optimize_state_prompt(self.config_manager, "THINKING", user_prompt, plan):
+            job.llm_feedback = "The Architect's plan was flawed (likely targeting a struct for a method). Retrying with better rules..."
+            return "THINKING", job
 
         if status != "SUCCESS":
             return "ROUTER", job

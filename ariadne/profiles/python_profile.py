@@ -32,7 +32,18 @@ class PythonProfile(BaseProfile):
             f"class {symbol_name}($$$): $$$"
         ]
 
+    def get_all_symbols_patterns(self) -> List[Tuple[str, str]]:
+        """
+        Patterns to find all functions and classes.
+        """
+        return [
+            ("def $NAME($$$): $$$", "$NAME"),
+            ("class $NAME: $$$", "$NAME"),
+            ("class $NAME($$$): $$$", "$NAME")
+        ]
+
     def get_skeleton_query(self) -> str:
+
         """
         Query to find function/method/class bodies for skeletonization.
         """
@@ -60,22 +71,3 @@ class PythonProfile(BaseProfile):
     @property
     def symbol_capture_name(self) -> str:
         return "symbol"
-
-    def get_available_symbols(self, filepaths: List[str]) -> List[str]:
-        """
-        Extracts all function and class names from the target files.
-        """
-        query = """
-        (function_definition name: (identifier) @name)
-        (class_definition name: (identifier) @name)
-        """
-        symbols = []
-        for path in filepaths:
-            try:
-                with open(path, "rb") as f:
-                    source = f.read()
-                nodes = self.sensor.query_nodes(source, query, "name")
-                symbols.extend([n["code"] for n in nodes])
-            except Exception:
-                continue
-        return list(set(symbols))

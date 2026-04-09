@@ -32,6 +32,10 @@ class BaseProfile(ABC):
         """List of file extensions supported by this profile (e.g., ['.rs'])."""
         pass
 
+    def get_standard_headers(self) -> str:
+        """Returns standard headers/imports to prepend to generated tests."""
+        return ""
+
     @abstractmethod
     def get_language_ptr(self) -> Any:
         """Return the tree-sitter language object/pointer."""
@@ -49,6 +53,10 @@ class BaseProfile(ABC):
 
     def get_symbol_patterns(self, symbol_name: str) -> List[str]:
         """Return a list of ast-grep patterns to find the target symbol."""
+        return []
+
+    def get_all_symbols_patterns(self) -> List[Tuple[str, str]]:
+        """Return a list of (pattern, meta_var_name) to find all symbols."""
         return []
 
     @abstractmethod
@@ -113,7 +121,26 @@ class BaseProfile(ABC):
 
     def get_available_symbols(self, filepaths: List[str]) -> List[str]:
         """Returns a list of all function/class symbols available in the targets."""
-        all_symbols = []
-        # This is a simplified version; usually we'd have a 'list all symbols' query
-        # For now, we'll return an empty list or implement a basic 'all_functions' query in profiles
-        return all_symbols
+        if self.ast_grep_lang:
+            from ariadne.primitives import QueryAstGrep
+            querier = QueryAstGrep(self.ast_grep_lang)
+            patterns = self.get_all_symbols_patterns()
+            all_symbols = set()
+            
+            for filepath in filepaths:
+                if not os.path.exists(filepath): continue
+                for pattern, meta_var in patterns:
+                    status, matches = querier.tick({
+                        "filepath": filepath, 
+                        "pattern": pattern,
+                        "vars": [meta_var]
+                    })
+                    if status == "SUCCESS":
+                        for m in matches:
+                            name = m.get("vars", {}).get(meta_var)
+                            if name:
+                                all_symbols.add(name)
+            return list(all_symbols)
+
+        # Fallback (empty or implemented in profiles)
+        return []

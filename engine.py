@@ -240,10 +240,20 @@ def main():
 
     # Resolve config path before changing directory
     config_path = os.path.abspath(args.config)
+    
+    # Absolute-ize targets before chdir so we can resolve them cleanly against the new root
+    if args.targets:
+        abs_targets = [os.path.abspath(t) for t in args.targets]
+    else:
+        abs_targets = None
 
     if args.project_dir and args.project_dir != ".":
         os.chdir(args.project_dir)
         logging.getLogger("ariadne").info(f"Changed project working directory to: {args.project_dir}")
+        
+    # Convert targets to be relative to the new working directory
+    if abs_targets:
+        args.targets = [os.path.relpath(t, os.getcwd()) for t in abs_targets]
 
     # 1. Load Configuration and Profile
     config_manager = ConfigManager(config_path)
