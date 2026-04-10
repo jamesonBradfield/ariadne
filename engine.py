@@ -359,7 +359,10 @@ def main():
             new_intent = setup_data.get("intent", args.intent)
             new_targets_raw = setup_data.get("targets", "")
             
-            if new_targets_raw:
+            # If targets were passed as a list from chat /add command
+            if isinstance(new_targets_raw, list):
+                target_files = ProfileLoader.expand_targets(new_targets_raw, profile)
+            elif isinstance(new_targets_raw, str) and new_targets_raw.strip():
                 new_targets_list = [t.strip() for t in new_targets_raw.split(",") if t.strip()]
                 target_files = ProfileLoader.expand_targets(new_targets_list, profile)
             
@@ -370,30 +373,29 @@ def main():
             start_state = "TRIAGE" if len(new_intent) > 15 else "INTERVENE"
             context.transition(start_state)
 
+            current_payload = None
             if start_state == "TRIAGE":
-                payload = {"input": new_intent, "target_files": target_files}
+                current_payload = {"input": new_intent, "target_files": target_files, "app": app}
             else:
-                payload = {
+                current_payload = {
                     "intent": new_intent, 
                     "target_files": target_files, 
                     "needs_elaboration": True, 
-                    "next_headless_state": "TRIAGE"
+                    "next_headless_state": "TRIAGE",
+                    "app": app
                 }
-
-            if "DISPATCH" in states_registry:
-                dispatch_state = states_registry["DISPATCH"]
-                if hasattr(dispatch_state, "prompt_user"):
-                    dispatch_state.prompt_user.app = app
             
-            # Inject app into payload for INTERVENE
-            if isinstance(payload, JobPayload):
-                payload.app = app
-            elif isinstance(payload, dict):
-                payload["app"] = app
+            # Update all states with app for UI messages
+            for state_obj in states_registry.values():
+                if hasattr(state_obj, "prompt_user"):
+                    state_obj.prompt_user.app = app
+                if hasattr(state_obj, "config_manager"):
+                    # Add app to config_manager if needed? No, usually states handle it.
+                    pass
 
             engine_thread = threading.Thread(
                 target=run_engine_loop,
-                args=(context, states_registry, payload, app),
+                args=(context, states_registry, current_payload, app),
                 daemon=True
             )
             engine_thread.start()
