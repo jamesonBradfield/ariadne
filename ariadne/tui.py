@@ -207,16 +207,19 @@ class AriadneApp:
             self.print_system_msg(f"Current targets: [cyan]{', '.join(self.targets) if self.targets else 'None'}[/]")
             self.print_system_msg(f"Active goal: [white]{self.active_intent}[/]")
         elif cmd == "/help":
-            help_text = (
-                "[bold cyan]/add <files>[/]  - Add files to the surgical session\n"
-                "[bold cyan]/drop <files>[/] - Remove files from the session\n"
-                "[bold cyan]/clear[/]        - Clear all targets\n"
-                "[bold cyan]/ls[/]           - List current targets and active goal\n"
-                "[bold cyan]/stop[/]         - Abort the current engine run\n"
-                "[bold cyan]/exit[/]         - Exit Ariadne\n"
-                "Or simply type your coding objective to start the engine."
-            )
-            self.print_system_msg(help_text)
+            table = Table(title="[bold blue]Ariadne Commands[/]", show_header=True, header_style="bold magenta", border_style="cyan", box=None)
+            table.add_column("Command", style="bold cyan", width=20)
+            table.add_column("Description", style="white")
+            
+            table.add_row("/add <files>", "Add files to the surgical session")
+            table.add_row("/drop <files>", "Remove files from the session")
+            table.add_row("/clear", "Clear all targets")
+            table.add_row("/ls", "List current targets and active goal")
+            table.add_row("/stop", "Abort the current engine run")
+            table.add_row("/exit", "Exit Ariadne")
+            
+            console.print(table)
+            self.print_system_msg("Or simply type your coding objective to start the engine.")
         else:
             self.print_system_msg(f"[bold red]Unknown command: {cmd}[/]")
 
