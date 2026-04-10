@@ -7,6 +7,9 @@ class RouterResponse(BaseModel):
     reasoning: str
     next_state: str
 
+class DispatchResponse(BaseModel):
+    test_code: str
+
 class ThinkingStep(BaseModel):
     symbol: str
 

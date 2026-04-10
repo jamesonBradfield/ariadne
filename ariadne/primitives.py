@@ -396,7 +396,6 @@ class QueryLLM(State):
                                 content = paragraphs[-1]
 
             if response_model:
-                logger.info(f"[LLM RESPONSE] Raw Content (Expected JSON): {content}")
                 try:
                     import json
                     json_str = content
@@ -407,52 +406,6 @@ class QueryLLM(State):
                 except Exception as e:
                     logger.error(f"Failed to validate JSON against model: {e}")
                     return "JSON_ERROR", content
-
-            logger.info(f"[LLM RESPONSE] Raw Content: {content}")
-
-            # Legacy Post-Processing Logic (Strip Markdown etc.)
-            if post_process == "strip_markdown":
-                cleaned_content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-                cleaned_content = re.sub(r"</?think>", "", cleaned_content, flags=re.IGNORECASE).strip()
-                
-                code_match = re.search(r"```(?:\w+)?\n(.*?)\n```", cleaned_content, re.DOTALL)
-                if code_match:
-                    return "SUCCESS", code_match.group(1).strip()
-                return "SUCCESS", cleaned_content.strip("`").strip()
-
-            if post_process == "extract_search_replace":
-                cleaned_content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-                
-                search_lines = []
-                replace_lines = []
-                state = "SCANNING"
-                
-                for line in cleaned_content.splitlines():
-                    stripped = line.strip()
-                    
-                    if stripped.startswith("<<<< SEARCH"):
-                        state = "IN_SEARCH"
-                        continue
-                    elif stripped.startswith("===="):
-                        state = "IN_REPLACE"
-                        continue
-                    elif stripped.startswith(">>>> REPLACE"):
-                        continue
-                    elif stripped.startswith(">>>>"):
-                        break
-                        
-                    if state == "IN_SEARCH":
-                        search_lines.append(line)
-                    elif state == "IN_REPLACE":
-                        replace_lines.append(line)
-                
-                if search_lines or replace_lines:
-                    line_ending = "\r\n" if "\r\n" in cleaned_content else "\n"
-                    search_text = line_ending.join(search_lines)
-                    replace_text = line_ending.join(replace_lines)
-                    return "SUCCESS", {"search": search_text, "replace": replace_text}
-
-                return "SEARCH_REPLACE_ERROR", content
 
             return "SUCCESS", content
         except Exception as e:

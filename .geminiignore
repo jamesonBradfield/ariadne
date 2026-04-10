@@ -1,0 +1,36 @@
+# Version Control
+.git/
+.github/
+
+# Python Environments & Cache
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+build/
+dist/
+
+# Rust, Build Artifacts, & Godot
+target/
+.godot/
+*.o
+*.exe
+*.pdb
+*.dll
+*.so
+*.bin
+
+# Node/MCP Servers
+node_modules/
+
+# Ariadne Specific Test & Runtime Artifacts
+ariadne_temp_test.*
+test_contract.*
+test.rs
+benchmark_results.json
+RealRustTest/
+C
+
+# OS Generated
+.DS_Store

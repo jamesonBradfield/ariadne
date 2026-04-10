@@ -9,7 +9,7 @@ import threading
 from typing import Any, Tuple, Dict, List, Optional, Union
 from .core import State
 from .payloads import (
-    JobPayload, RouterResponse, ThinkingResponse, 
+    JobPayload, RouterResponse, DispatchResponse, ThinkingResponse, 
     MapsNavResponse, MapsThinkResponse, MapsSurgeonResponse,
     SelfOptimizationResponse
 )
@@ -79,9 +79,9 @@ class TRIAGE(State):
             logger.error("LLM refused to triage the intent. Check prompts or model safety settings.")
             return "ABORT", (payload if is_job else JobPayload(intent=f"LLM Refusal: {technical_intent}"))
 
-        # AMNESIA CHECK: If the LLM echoed instructions or wrote a novel, discard it
+        # AMNESIA CHECK: If the LLM echoed instructions, discard it
         clean_intent = technical_intent.strip()
-        if len(clean_intent) > 400 or "Task:" in clean_intent or "Analyze the Request" in clean_intent or "Output:" in clean_intent:
+        if "Task:" in clean_intent or "Analyze the Request" in clean_intent or "Output:" in clean_intent or "Constraint:" in clean_intent:
             logger.warning("TRIAGE generated noisy or mirrored output. Discarding and using original user input.")
             clean_intent = input_val
 
@@ -142,22 +142,24 @@ class DISPATCH(State):
             self.prompt_user.app = job.app
 
         query = QueryLLM(model=model_info.get("model"), api_base=model_info.get("api_base"))
-        status, test_code = query.tick({
+        status, result = query.tick({
             "system": system_prompt,
             "user": user_prompt,
             "params": model_info.get("params", {}),
-            "post_process": state_config.get("post_process")
+            "response_model": DispatchResponse
         })
+        
+        if status != "SUCCESS":
+            return "ABORT", job
+
+        test_code = result.test_code
         
         # Inject standard headers
         standard_headers = self.profile.get_standard_headers()
         if standard_headers and standard_headers not in test_code:
             test_code = f"{standard_headers}\n{test_code}"
 
-        record_interaction(job, "DISPATCH", system_prompt, user_prompt, test_code)
-
-        if status != "SUCCESS":
-            return "ABORT", job
+        record_interaction(job, "DISPATCH", system_prompt, user_prompt, result)
 
         proposal = f"Proposed Test Code ({self.test_filepath}):\n\n{test_code}"
         status, approved = self.prompt_user.tick(proposal)
@@ -919,9 +921,10 @@ class POST_MORTEM(State):
             model_info = self.config_manager.get_model_info("POST_MORTEM")
             state_config = self.config_manager.config["states"]["POST_MORTEM"]
             
-            # Format history for the LLM
+            # Format history for the LLM - Limit to last 5 to keep context clean
             history_str = ""
-            for i, trace in enumerate(job.interaction_history[-10:]): # Last 10 interactions
+            visible_history = job.interaction_history[-5:]
+            for i, trace in enumerate(visible_history):
                 history_str += f"\n--- Interaction {i} ({trace.state}) ---\n"
                 history_str += f"System: {trace.system_prompt[:200]}...\n"
                 history_str += f"User: {trace.user_prompt[:500]}...\n"
