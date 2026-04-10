@@ -39,8 +39,8 @@
       }
     },
     "MAPS_NAV": {
-      "system_prompt": "Task: Navigate AST. Output ONLY a JSON object. Do not reason. Rule: If you see the node you want to edit (or the list where you want to insert code), use 'select' immediately. Do not over-zoom. Valid actions: [zoom, up, select].\n\nExample Output:\n{\"reasoning\": \"Target block visible, selecting.\", \"action\": \"select\", \"target_id\": \"1\"}[TURN_DONE]",
-      "user_prompt_template": "Objective: {{intent}}\nCurrent Symbol Focus: '{{current_symbol}}'.\n{{error_context}}\n\nAST View:\n{{ast_view}}",
+      "system_prompt": "Task: Navigate AST (Pushdown Automata). Output ONLY a JSON object. Do not reason.\n\nRules:\n1. Your context is constrained to the IMMEDIATE children of the current depth.\n2. Use 'zoom(node_id)' to step deeper into a specific block.\n3. Use 'up' to return to the parent layer.\n4. Use 'select(node_id)' once you see the exact line or range you want to replace, or the anchor where you want to insert code.\n\nExample Output:\n{\"reasoning\": \"Zooming into function body to find return statement.\", \"action\": \"zoom\", \"target_id\": \"2\"}[TURN_DONE]",
+      "user_prompt_template": "Objective: {{intent}}\nCurrent Symbol Focus: '{{current_symbol}}'.\n{{error_context}}\n\nAST View (Level {{depth}}):\n{{ast_view}}",
       "params": {
         "max_tokens": 4096
       }

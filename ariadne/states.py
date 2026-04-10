@@ -555,9 +555,11 @@ class MAPS_NAV(State):
             job.maps_state["navigation_stack"] = [(target_node["start_byte"], target_node["end_byte"])]
             job.fixed_code = {"filepath": filepath, "edits": []}
         
-        start_byte, end_byte = job.maps_state["navigation_stack"][-1]
+        stack = job.maps_state["navigation_stack"]
+        start_byte, end_byte = stack[-1]
+        depth = len(stack) - 1
         
-        # Render AST View
+        # Render AST View - constrained to children of current stack top
         sensor = TreeSitterSensor(self.profile.get_language_ptr())
         with open(filepath, "rb") as f:
             source = f.read()
@@ -568,7 +570,7 @@ class MAPS_NAV(State):
         if lsp:
             diagnostics = lsp.get_diagnostics(filepath)
             if diagnostics:
-                ast_view += "\n\nLSP DIAGNOSTICS FOR THIS FILE:\n" + json.dumps(diagnostics, indent=2)
+                ast_view += "\n\nLSP DIAGNOSTICS:\n" + json.dumps(diagnostics, indent=2)
 
         model_info = self.config_manager.get_model_info("MAPS_NAV")
         state_config = self.config_manager.config["states"]["MAPS_NAV"]
@@ -583,7 +585,8 @@ class MAPS_NAV(State):
                 "intent": context.intent,
                 "current_symbol": current_symbol,
                 "error_context": getattr(job, "llm_feedback", "") or "",
-                "ast_view": ast_view
+                "ast_view": ast_view,
+                "depth": depth
             }
         )
 
@@ -598,55 +601,53 @@ class MAPS_NAV(State):
         record_interaction(context, "MAPS_NAV", state_config["system_prompt"], user_prompt, result)
 
         if status != "SUCCESS":
-            job.llm_feedback = f"Failed to get structured navigation response: {result}"
+            job.llm_feedback = f"Navigation Query Failed: {result}"
             return "ROUTER", job
 
         action = result.action
         target_id = str(result.target_id)
         
-        # Fuzzy ID Resolution: If the LLM sent a byte range like "123-456" instead of a short ID
-        if target_id not in id_map:
+        # Fuzzy ID Resolution
+        if action != "up" and target_id not in id_map:
             for sid, (start, end) in id_map.items():
-                range_str = f"{start}-{end}"
-                if target_id == range_str:
-                    logger.info(f"Fuzzy resolved byte-range '{target_id}' to short ID '{sid}'")
+                if target_id == f"{start}-{end}":
                     target_id = sid
                     break
 
         if action == "zoom":
             if target_id in id_map:
-                new_range = id_map[str(target_id)]
+                new_range = id_map[target_id]
                 if new_range == (start_byte, end_byte):
-                    job.llm_feedback = f"You are already focused on node '{target_id}'. To move deeper, zoom into a child ID (0, 1, 2, etc.)."
+                    job.llm_feedback = f"Node '{target_id}' is the current view. Use 'select' or zoom into a CHILD id."
                     return "MAPS_NAV", job
                 job.maps_state["navigation_stack"].append(new_range)
-                job.llm_feedback = None # Clear feedback on success
+                job.llm_feedback = None 
                 return "MAPS_NAV", job
             else:
-                job.llm_feedback = f"Invalid target_id for zoom: {target_id}. Available IDs: {list(id_map.keys())}"
+                job.llm_feedback = f"Invalid zoom target '{target_id}'. Valid IDs: {list(id_map.keys())}"
                 return "MAPS_NAV", job
         
         elif action == "up":
-            if len(job.maps_state["navigation_stack"]) > 1:
+            if len(stack) > 1:
                 job.maps_state["navigation_stack"].pop()
                 job.llm_feedback = None
                 return "MAPS_NAV", job
             else:
-                job.llm_feedback = "You are already at the top of the current symbol's AST view. You cannot go higher. If you need to edit a different part of the file, use 'select' on a visible node or 'abort' in the THINK phase."
+                job.llm_feedback = "Navigation Ceiling: Already at the top of the symbol block."
                 return "MAPS_NAV", job
         
         elif action == "select":
-            if target_id is not None and str(target_id) in id_map:
-                job.maps_state["locked_node_id"] = str(target_id)
-                job.maps_state["locked_range"] = id_map[str(target_id)]
-                job.maps_state["id_map"] = id_map # Save for Surgeon
+            if target_id in id_map:
+                job.maps_state["locked_node_id"] = target_id
+                job.maps_state["locked_range"] = id_map[target_id]
+                job.maps_state["id_map"] = id_map 
                 job.llm_feedback = None
                 return "MAPS_THINK", job
             else:
-                job.llm_feedback = f"Invalid target_id for select: {target_id}. Available IDs: {list(id_map.keys())}"
+                job.llm_feedback = f"Invalid selection target '{target_id}'."
                 return "MAPS_NAV", job
 
-        job.llm_feedback = f"Unknown action: {action}"
+        job.llm_feedback = f"Unsupported action: {action}"
         return "MAPS_NAV", job
 
 
