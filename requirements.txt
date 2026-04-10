@@ -4,3 +4,5 @@ pyperclip
 mcp
 ast-grep-py
 pydantic
+prompt-toolkit
+rich
