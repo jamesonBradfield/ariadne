@@ -79,12 +79,18 @@ class TRIAGE(State):
             logger.error("LLM refused to triage the intent. Check prompts or model safety settings.")
             return "ABORT", (payload if is_job else JobPayload(intent=f"LLM Refusal: {technical_intent}"))
 
+        # AMNESIA CHECK: If the LLM echoed instructions or wrote a novel, discard it
+        clean_intent = technical_intent.strip()
+        if len(clean_intent) > 400 or "Task:" in clean_intent or "Analyze the Request" in clean_intent or "Output:" in clean_intent:
+            logger.warning("TRIAGE generated noisy or mirrored output. Discarding and using original user input.")
+            clean_intent = input_val
+
         if is_job:
-            payload.intent = technical_intent.strip()
+            payload.intent = clean_intent
             return "DISPATCH", payload
         
         job = JobPayload(
-            intent=technical_intent.strip(),
+            intent=clean_intent,
             target_files=payload.get("target_files", [])
         )
         # Preserve app reference

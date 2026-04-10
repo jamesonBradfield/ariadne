@@ -365,15 +365,26 @@ class QueryLLM(State):
                             content = code_match.group(1)
                         else:
                             paragraphs = [p.strip() for p in reasoning.split("\n\n") if p.strip()]
-                            meta_markers = ["self-correction", "thinking process", "note:", "prompt asks", "analyzing", "identifying", "identifying key", "draft the intent", "refine for conciseness", "constraint:", "task:"]
-                            
+                            meta_markers = [
+                                "self-correction", "thinking process", "note:", "prompt asks", 
+                                "analyzing", "identifying", "identifying key", "draft the intent", 
+                                "refine for conciseness", "constraint:", "task:", "analyze the request",
+                                "output:", "rules:", "technical intent:", "output raw json only"
+                            ]
+
                             best_candidate = ""
                             for p in reversed(paragraphs):
-                                if any(p.lower().startswith(m) for m in meta_markers):
+                                p_lower = p.lower()
+                                # Skip if it looks like meta-commentary or rule recitations
+                                if any(m in p_lower for m in meta_markers):
                                     continue
+
+                                # Skip if it's too long and looks like an instruction list
+                                if len(p) > 400 and p.count("*") > 2:
+                                    continue
+
                                 best_candidate = p
-                                break
-                            
+                                break                            
                             if best_candidate:
                                 content = best_candidate
                                 clean_headers = ["final output generation:", "final output:", "objective:", "summary:", "technical intent:"]

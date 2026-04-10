@@ -213,6 +213,24 @@ class AriadneApp:
                 self.print_system_msg("No engine is currently running.")
         elif cmd == "/test":
             self.print_system_msg("Manual test execution not yet implemented via command.")
+        elif cmd == "/splat":
+            splat_file = "C:/Users/jamie/projects/Godot/TexelSplatting/.rust/src/realtime_probe.rs"
+            if not os.path.exists(splat_file):
+                self.print_system_msg(f"[bold red]Splat file not found: {splat_file}[/]")
+                return
+            
+            self.targets = [splat_file]
+            intent = "Implement get_total_cameras method in RealtimeProbe. It should return self.cameras.len() as i32."
+            self.active_intent = intent
+            self.print_ariadne_msg(f"Running Splat Test: {intent}")
+            
+            if not self.engine_running and self.start_callback:
+                self.engine_running = True
+                threading.Thread(
+                    target=self.start_callback, 
+                    args=({"intent": intent, "targets": self.targets},), 
+                    daemon=True
+                ).start()
         elif cmd == "/ls":
             self.print_system_msg(f"Current targets: [cyan]{', '.join(self.targets) if self.targets else 'None'}[/]")
             self.print_system_msg(f"Active goal: [white]{self.active_intent}[/]")
