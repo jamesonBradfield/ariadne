@@ -227,19 +227,29 @@ class QueryLLM(State):
     def tick(self, payload: Dict[str, Any], context: 'EngineContext') -> Tuple[str, Any]:
         import litellm
         import re
+        import tiktoken
 
         system = payload.get("system", "")
         user = payload.get("user", "")
         params = payload.get("params", {})
         response_model = payload.get("response_model")
 
+        # Empirical Token Measurement
+        try:
+            encoding = tiktoken.get_encoding("cl100k_base") # Standard for GPT-4/Turbo
+            input_tokens = len(encoding.encode(system + user))
+        except Exception:
+            input_tokens = 0
+
         logger.info(f"[LLM REQUEST] System Prompt: {system}")
         logger.info(f"[LLM REQUEST] User Prompt: {user}")
+        logger.info(f"[TOKEN BUDGET] Input: ~{input_tokens} tokens")
 
         messages = [
             {"role": "system", "content": system},
-            {"role": "user", "content": user},
+            {"role": "user", "content": user}
         ]
+
 
         try:
             # Prepare arguments
@@ -355,6 +365,15 @@ class QueryLLM(State):
                                         break
                             elif paragraphs:
                                 content = paragraphs[-1]
+
+            # Measure Output Tokens
+            try:
+                output_tokens = len(encoding.encode(content))
+            except Exception:
+                output_tokens = 0
+            
+            context.total_tokens += (input_tokens + output_tokens)
+            logger.info(f"[TOKEN BUDGET] Output: ~{output_tokens} tokens | Session Total: ~{context.total_tokens}")
 
             if response_model:
                 try:

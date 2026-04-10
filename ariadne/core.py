@@ -43,6 +43,7 @@ class EngineContext:
         self.profile = profile
         self.history = []
         self.interaction_history = [] # Trace for self-optimization
+        self.total_tokens = 0
         self.stop_requested = False
         self._listeners: List[Callable[[AriadneEvent], None]] = []
         

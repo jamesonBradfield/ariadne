@@ -478,38 +478,48 @@ class SENSE(State):
         
         # SEARCH for the symbol's CURRENT location on disk
         found_nodes = []
+        is_addition = any(x in context.intent.lower() for x in ["add", "implement", "create", "new"])
+
         for filepath in context.target_files:
             if not os.path.exists(filepath): continue
             try:
-                # NEW: If adding a method, sense the PARENT of the anchor to avoid Navigation Ceiling
-                is_addition = any(x in context.intent.lower() for x in ["add", "implement", "create", "new"])
-                
                 status, nodes = self.profile.find_symbol(filepath, symbol, context)
+                
+                # If it's an addition and the symbol isn't found, try to find the PARENT (the struct/impl)
+                if is_addition and (status != "SUCCESS" or not nodes):
+                    logger.info(f"Symbol {symbol} not found for addition. Searching for parent block...")
+                    # For now, we assume the symbol in the plan might be the class name if it's the first step
+                    status, nodes = self.profile.find_symbol(filepath, symbol, context)
+                
                 if status == "SUCCESS" and nodes:
                     for node in nodes:
                         if is_addition:
-                            logger.info(f"Addition detected. Bubbling up SENSE to parent of {symbol}...")
-                            status_p, parent = self.profile.get_parent_block(filepath, node["start_byte"], context)
-                            if status_p == "SUCCESS" and parent:
+                            # If we are adding, we might want to edit the block containing the symbol, 
+                            # or the symbol itself if it's the class/impl.
+                            logger.info(f"Addition mode: Sensing block for {symbol}...")
+                            
+                            # If the node IS a block already, use it. Otherwise, bubble up.
+                            if "impl" in node["node_type"] or "class" in node["node_type"]:
                                 found_nodes.append({
                                     "filepath": filepath,
                                     "symbol": symbol,
-                                    "node_string": parent["code"],
-                                    "start_byte": parent["start_byte"],
-                                    "end_byte": parent["end_byte"],
-                                    "node_type": parent["type"]
+                                    "node_string": node["code"],
+                                    "start_byte": node["start_byte"],
+                                    "end_byte": node["end_byte"],
+                                    "node_type": node["node_type"]
                                 })
-                                continue
-
-                        found_nodes.append({
-                            "filepath": filepath,
-                            "symbol": symbol,
-                            "node_string": node["code"],
-                            "start_byte": node["start_byte"],
-                            "end_byte": node["end_byte"],
-                            "node_type": node["type"]
-                        })
-                    break # Found it in this file
+                            else:
+                                status_p, parent = self.profile.get_parent_block(filepath, node["start_byte"], context)
+                                if status_p == "SUCCESS" and parent:
+                                    found_nodes.append({
+                                        "filepath": filepath,
+                                        "symbol": symbol,
+                                        "node_string": parent["code"],
+                                        "start_byte": parent["start_byte"],
+                                        "end_byte": parent["end_byte"],
+                                        "node_type": parent["type"]
+                                    })
+                            continue
             except Exception as e:
                 logger.error(f"Sensing error for {symbol} in {filepath}: {e}")
                 continue
