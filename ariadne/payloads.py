@@ -57,11 +57,8 @@ class InteractionTrace(BaseModel):
 class JobPayload(BaseModel):
     """
     Data carried between states in the Ariadne HFSM.
-    Strict Pydantic model for validation and dot-notation access.
+    Contains ONLY transient, state-specific data.
     """
-    intent: str
-    target_files: List[str] = Field(default_factory=list)
-    
     # DISPATCH / EVALUATE outputs
     test_code: Optional[str] = None
     test_stdout: Optional[str] = None
@@ -77,18 +74,11 @@ class JobPayload(BaseModel):
     fixed_code: Optional[Dict[str, Any]] = None
     llm_feedback: Optional[str] = None
     
-    # Trace for self-optimization
-    interaction_history: List[InteractionTrace] = Field(default_factory=list)
-    
-    # Global state
+    # Engine progress
     retry_count: int = 0
-    app: Any = None # Reference to AriadneApp for TUI messages
     
     # Human-in-the-loop triggers
     needs_elaboration: bool = False
     failing_file: Optional[str] = None
     failing_line: Optional[str] = None
     next_headless_state: str = "ROUTER"
-
-    class Config:
-        arbitrary_types_allowed = True

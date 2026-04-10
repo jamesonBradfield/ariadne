@@ -106,18 +106,24 @@ class ConfigManager:
 
 class ProfileLoader:
     """
-    Handles loading language profiles and expanding target lists.
+    Handles loading language profiles from JSON or hardcoded defaults.
     """
     @staticmethod
     def load_profile(name: str):
-        if name.lower() == "rust":
-            from ariadne.profiles.rust_profile import RustProfile
-            return RustProfile()
-        elif name.lower() == "python":
-            from ariadne.profiles.python_profile import PythonProfile
-            return PythonProfile()
-        else:
-            raise ValueError(f"Unsupported profile: {name}")
+        engine_root = os.path.dirname(os.path.abspath(__file__))
+        profile_path = os.path.join(engine_root, "ariadne", "profiles", f"{name.lower()}.json")
+        
+        if os.path.exists(profile_path):
+            try:
+                with open(profile_path, "r") as f:
+                    config = json.load(f)
+                from ariadne.profiles.base import DynamicProfile
+                return DynamicProfile(config)
+            except Exception as e:
+                logger.error(f"Failed to load JSON profile {name}: {e}")
+                raise
+
+        raise ValueError(f"Profile configuration not found for: {name} (Checked {profile_path})")
 
     @staticmethod
     def expand_targets(targets: List[str], profile) -> List[str]:
@@ -128,9 +134,7 @@ class ProfileLoader:
                 expanded.append(t)
             elif os.path.isdir(t):
                 for root, dirs, files in os.walk(t):
-                    # Prune ignored directories in-place
                     dirs[:] = [d for d in dirs if not ignore_handler.is_ignored(os.path.join(root, d))]
-                    
                     for f in files:
                         full_path = os.path.join(root, f)
                         if any(full_path.endswith(ext) for ext in profile.extensions):
@@ -157,40 +161,26 @@ def run_engine_loop(
     context: EngineContext, 
     states_registry: Dict[str, State], 
     initial_payload: Any, 
-    app: Optional[AriadneApp] = None,
     max_turns: int = 40,
     global_timeout: int = 1800
 ):
     """
-    Executes the HFSM loop. Can be run in a background thread.
+    Executes the HFSM loop. Emits events via context for UI/Logging.
     """
     payload = initial_payload
     
-    if app:
-        intent = getattr(payload, "intent", payload.get("intent", "")) if payload else ""
-        app.call_from_thread(app.update_intent, intent)
+    intent = getattr(payload, "intent", payload.get("intent", "")) if payload else ""
+    context.emit("INTENT_UPDATE", {"intent": intent})
 
     start_wall_time = time.time()
     turn_count = 0
     
-    # Try to override from CLI args if they exist and werent passed explicitly
-    try:
-        import __main__
-        if hasattr(__main__, 'args'):
-            if max_turns == 40: # Only override if using default
-                max_turns = getattr(__main__.args, 'max_turns', 40)
-            if global_timeout == 1800:
-                global_timeout = getattr(__main__.args, 'timeout', 1800)
-    except Exception:
-        pass
-
     while context.current_state != "FINISH":
         # Safety Checks
         elapsed_total = time.time() - start_wall_time
         if elapsed_total > global_timeout:
             logger.error(f"Global timeout reached ({global_timeout}s). Aborting.")
             context.transition("ABORT")
-            # Continue to allow one last tick to POST_MORTEM if needed
         
         if turn_count >= max_turns and context.current_state not in ["SUCCESS", "ABORT", "POST_MORTEM"]:
             logger.error(f"Maximum transitions reached ({max_turns}). Aborting.")
@@ -203,26 +193,18 @@ def run_engine_loop(
              context.transition("POST_MORTEM")
              logger.info(f"Terminal state {context.current_state} reached. Transitioning to POST_MORTEM.")
 
-        if app:
-            # retry_count = getattr(payload, "retry_count", 0) if hasattr(payload, "retry_count") else 0
-            # Use global turn count for TUI indicator
-            app.post_message(StateTransitionMessage(context.current_state, turn_count + 1))
-            
-            # Update Plan tab if plan changed
-            if hasattr(payload, "plan") and payload.plan:
-                app.call_from_thread(app.update_plan, payload.plan)
-            
-            # Update Surgeon tab if MAPS has extracted nodes
-            if hasattr(payload, "extracted_nodes") and payload.extracted_nodes:
-                # Show the currently active node being worked on by MAPS
-                idx = getattr(payload, "maps_state", {}).get("current_target_index", 0)
-                if idx < len(payload.extracted_nodes):
-                    node = payload.extracted_nodes[idx]
-                    # ROBUST FIX: Ensure payload.fixed_code exists and is NOT None
-                    edits = []
-                    if hasattr(payload, "fixed_code") and payload.fixed_code is not None:
-                        edits = payload.fixed_code.get("edits", [])
-                    app.call_from_thread(app.update_surgeon, node["symbol"], node["node_string"], edits)
+        # Data-driven UI updates via events
+        if hasattr(payload, "plan") and payload.plan:
+            context.emit("PLAN_UPDATE", payload.plan.model_dump() if hasattr(payload.plan, "model_dump") else payload.plan)
+        
+        if hasattr(payload, "extracted_nodes") and payload.extracted_nodes:
+            idx = getattr(payload, "maps_state", {}).get("current_target_index", 0)
+            if idx < len(payload.extracted_nodes):
+                node = payload.extracted_nodes[idx]
+                edits = []
+                if hasattr(payload, "fixed_code") and payload.fixed_code is not None:
+                    edits = payload.fixed_code.get("edits", [])
+                context.emit("SURGEON_UPDATE", {"symbol": node["symbol"], "code": node["node_string"], "edits": edits})
 
         active_state = states_registry.get(context.current_state)
         
@@ -231,12 +213,10 @@ def run_engine_loop(
             break
 
         start_time = time.time()
-        
-        current_state_name, payload = active_state.tick(payload)
-        
+        current_state_name, payload = active_state.tick(payload, context)
         elapsed = time.time() - start_time
-        logger.info(f"[BENCHMARK] {context.current_state} took {elapsed:.2f}s")
         
+        logger.info(f"[BENCHMARK] {context.current_state} took {elapsed:.2f}s")
         context.transition(current_state_name)
         turn_count += 1
 
@@ -247,9 +227,7 @@ def run_engine_loop(
         if current_state_name == "FINISH":
              break
              
-    if app:
-        app.post_message(StateTransitionMessage("FINISH", 0))
-
+    context.emit("STATE_CHANGE", {"state": "FINISH", "turn": turn_count})
     logger.info(f"Engine dropped to terminal state: {context.current_state}")
 
 
@@ -343,33 +321,30 @@ def main():
 
     states_registry = create_states(target_files)
 
-    # 4. Initialize Engine Context
-    context = EngineContext(initial_state=args.initial_state.upper())
+    # 4. Initialize Engine Context with global session state
+    context = EngineContext(
+        initial_state=args.initial_state.upper(),
+        intent=args.intent or "",
+        target_files=target_files,
+        profile=profile
+    )
     
-    if context.current_state == "TRIAGE":
-        payload = {"input": args.intent, "target_files": target_files}
-    elif context.current_state == "INTERVENE":
-        payload = {
-            "intent": args.intent, 
-            "target_files": target_files, 
-            "needs_elaboration": True, 
-            "next_headless_state": "TRIAGE"
-        }
-    else:
-        # If bypassing TRIAGE/DISPATCH, mock the payload structure they would have created
-        payload = JobPayload(intent=args.intent, target_files=target_files)
-
     # 5. Launch UI or CLI Loop
     if args.tui:
         app = AriadneApp()
         
+        # Subscribe TUI to engine events
+        context.subscribe(app.post_message)
+        # Provide context to app for /stop slash command
+        app.current_context = context
+
         def start_engine_callback(setup_data: Dict[str, Any]):
-            nonlocal target_files, states_registry, payload
+            nonlocal target_files, states_registry
             
             new_intent = setup_data.get("intent", args.intent)
             new_targets_raw = setup_data.get("targets", "")
             
-            # If targets were passed as a list from chat /add command
+            # Re-expand targets if they changed in UI
             if isinstance(new_targets_raw, list):
                 target_files = ProfileLoader.expand_targets(new_targets_raw, profile)
             elif isinstance(new_targets_raw, str) and new_targets_raw.strip():
@@ -379,41 +354,24 @@ def main():
             # Re-build states
             states_registry = create_states(target_files)
             
-            # INTELLIGENT SKIP: If intent is already substantial, skip elaboration
+            # Determine start state
             start_state = "TRIAGE" if len(new_intent) > 15 else "INTERVENE"
-            context.transition(start_state)
+            context.current_state = start_state
 
             current_payload = None
             if start_state == "TRIAGE":
-                current_payload = {"input": new_intent, "target_files": target_files, "app": app}
+                current_payload = {"input": new_intent, "target_files": target_files}
             else:
                 current_payload = {
                     "intent": new_intent, 
                     "target_files": target_files, 
                     "needs_elaboration": True, 
-                    "next_headless_state": "TRIAGE",
-                    "app": app
+                    "next_headless_state": "TRIAGE"
                 }
             
-            # Update all states with app for UI messages and abort support
-            for state_obj in states_registry.values():
-                if hasattr(state_obj, "prompt_user"):
-                    state_obj.prompt_user.app = app
-                
-                # NEW: Inject app into QueryLLM for streaming/abort support
-                # Traverse the state object to find if it uses QueryLLM
-                # This is a bit of a hack but avoids changing every state constructor
-                for attr_name in dir(state_obj):
-                    attr = getattr(state_obj, attr_name)
-                    if hasattr(attr, "name") and getattr(attr, "name") == "QUERY_LLM":
-                        attr.app = app
-
-            # Provide context to app for /stop slash command
-            app.current_context = context
-
             engine_thread = threading.Thread(
                 target=run_engine_loop,
-                args=(context, states_registry, current_payload, app),
+                args=(context, states_registry, current_payload, args.max_turns, args.timeout),
                 daemon=True
             )
             engine_thread.start()
@@ -426,7 +384,20 @@ def main():
         
         app.run()
     else:
-        run_engine_loop(context, states_registry, payload)
+        # CLI Mode
+        if context.current_state == "TRIAGE":
+            payload = {"input": args.intent, "target_files": target_files}
+        elif context.current_state == "INTERVENE":
+            payload = {
+                "intent": args.intent, 
+                "target_files": target_files, 
+                "needs_elaboration": True, 
+                "next_headless_state": "TRIAGE"
+            }
+        else:
+            payload = JobPayload(intent=args.intent, target_files=target_files)
+
+        run_engine_loop(context, states_registry, payload, args.max_turns, args.timeout)
 
 
 if __name__ == "__main__":

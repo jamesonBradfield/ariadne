@@ -24,7 +24,7 @@ class QueryAstGrep(State):
         super().__init__("QUERY_AST_GREP")
         self.language = language
 
-    def tick(self, payload: Dict[str, Any]) -> Tuple[str, List[Dict[str, Any]]]:
+    def tick(self, payload: Dict[str, Any], context: 'EngineContext') -> Tuple[str, List[Dict[str, Any]]]:
         filepath = payload.get("filepath")
         pattern = payload.get("pattern")
         rule = payload.get("rule")
@@ -107,7 +107,7 @@ class QueryMCP(State):
                 result = await session.call_tool(tool_name, tool_args)
                 return result
 
-    def tick(self, payload: Dict[str, Any]) -> Tuple[str, Any]:
+    def tick(self, payload: Dict[str, Any], context: 'EngineContext') -> Tuple[str, Any]:
         command = payload.get("command")
         args = payload.get("args", [])
         tool_name = payload.get("tool_name")
@@ -149,7 +149,7 @@ class ExtractAST(State):
 
         self.parser = tree_sitter.Parser(self.language)
 
-    def tick(self, payload: Dict[str, Any]) -> Tuple[str, List[str]]:
+    def tick(self, payload: Dict[str, Any], context: 'EngineContext') -> Tuple[str, List[str]]:
         filepath = payload.get("filepath")
         query_string = payload.get("query_string")
         capture_name = payload.get("capture_name", "node")
@@ -206,7 +206,6 @@ class QueryLLM(State):
     def __init__(self, model: Optional[str] = None, api_base: Optional[str] = None):
         import os
         super().__init__("QUERY_LLM")
-        self.app = None # Set by engine if TUI is enabled
 
         # 1. Prioritize passed args, then Env, then local defaults
         self.api_base = (
@@ -225,18 +224,13 @@ class QueryLLM(State):
         # Only use API key if provided, otherwise 'none' for local servers
         self.api_key = os.getenv("ARIADNE_API_KEY") or "none"
 
-    def tick(self, payload: Dict[str, Any]) -> Tuple[str, Any]:
+    def tick(self, payload: Dict[str, Any], context: 'EngineContext') -> Tuple[str, Any]:
         import litellm
         import re
-        from rich.live import Live
-        from rich.markdown import Markdown
-        from rich.panel import Panel
-        from .tui import console
 
         system = payload.get("system", "")
         user = payload.get("user", "")
         params = payload.get("params", {})
-        post_process = payload.get("post_process")
         response_model = payload.get("response_model")
 
         logger.info(f"[LLM REQUEST] System Prompt: {system}")
@@ -269,64 +263,49 @@ class QueryLLM(State):
             content = ""
             reasoning = ""
             
-            # Setup Live display for streaming
+            # Identify role for UI
             role_label = "Ariadne"
             if "Architect" in system: role_label = "Architect"
             elif "Surgeon" in system: role_label = "Surgeon"
             elif "Router" in system: role_label = "Router"
 
-            with Live(console=console, auto_refresh=True) as live:
-                def update_display(current_content, current_reasoning):
-                    display_text = ""
-                    if current_reasoning:
-                        display_text += f"**THINKING**\n{current_reasoning}\n\n"
-                    if current_content:
-                        display_text += f"{current_content}"
-                    
-                    if not display_text: display_text = "..."
-                    
-                    live.update(Panel(
-                        Markdown(display_text), 
-                        title=f"[bold blue]{role_label}[/bold blue]", 
-                        border_style="blue", 
-                        expand=False
-                    ))
+            response_gen = litellm.completion(**completion_args)
+            
+            for chunk in response_gen:
+                # Check for context abort (Stop button or turns limit)
+                if context.stop_requested:
+                    logger.warning("Stop requested during LLM stream. Terminating.")
+                    return "ABORT", "Interrupted by user."
 
-                response_gen = litellm.completion(**completion_args)
+                delta = chunk.choices[0].delta
                 
-                for chunk in response_gen:
-                    # Check for ABORT event from TUI /stop command
-                    if self.app and self.app.abort_event.is_set():
-                        logger.warning("Abort requested during LLM stream. Terminating.")
-                        self.app.abort_event.clear() # Reset for next run
-                        return "ABORT", "Interrupted by user."
-
-                    delta = chunk.choices[0].delta
-                    
-                    # Handle standard content
-                    chunk_content = getattr(delta, "content", None)
-                    if chunk_content:
-                        content += chunk_content
-                    
-                    # Handle reasoning content
-                    chunk_reasoning = getattr(delta, "reasoning_content", None)
-                    if not chunk_reasoning and hasattr(delta, "provider_specific_fields"):
-                        psf = delta.provider_specific_fields or {}
-                        chunk_reasoning = psf.get("reasoning_content")
-                    
-                    if chunk_reasoning:
-                        reasoning += chunk_reasoning
-                    
-                    update_display(content, reasoning)
+                # Handle standard content
+                chunk_content = getattr(delta, "content", None)
+                if chunk_content:
+                    content += chunk_content
+                
+                # Handle reasoning content
+                chunk_reasoning = getattr(delta, "reasoning_content", None)
+                if not chunk_reasoning and hasattr(delta, "provider_specific_fields"):
+                    psf = delta.provider_specific_fields or {}
+                    chunk_reasoning = psf.get("reasoning_content")
+                
+                if chunk_reasoning:
+                    reasoning += chunk_reasoning
+                
+                # Emit streaming event for UI
+                context.emit("LLM_STREAM", {
+                    "role": role_label,
+                    "content": content,
+                    "reasoning": reasoning
+                })
 
             # Post-stream processing
             if reasoning:
                 logger.info(f"[LLM REASONING]\n{reasoning}")
-                # Salvage logic: If main content is empty but reasoning contains the answer, 
-                # try to extract it (especially if we hit token limits)
+                # Salvage logic: If main content is empty but reasoning contains the answer
                 if not content.strip():
                     logger.warning("Main content empty. Attempting to salvage from reasoning_content...")
-                    # Look for JSON first - prefer objects with common Ariadne keys
                     json_patterns = [
                         r"(\{\s*\"reasoning\":.*?\})",
                         r"(\{\s*\"action\":.*?\})",
@@ -341,48 +320,30 @@ class QueryLLM(State):
                         matches = re.finditer(pattern, reasoning, re.DOTALL)
                         for match in matches:
                             candidate = match.group(1)
-                            # Skip templates/placeholders
                             if '\"...\"' in candidate or '<string>' in candidate or '<next_state>' in candidate:
                                 continue
-                            
-                            # NEW: Strict State/Symbol Check
                             if "next_state" in candidate:
                                 if not any(f'"{s}"' in candidate for s in valid_states):
                                     continue
-                            
                             if "steps" in candidate and "[]" in candidate:
                                 continue
-
                             content = candidate
                             found_json = True
                             break
                         if found_json: break
                     
                     if not found_json:
-                        # Look for markdown code blocks
                         code_match = re.search(r"```(?:\w+)?\n(.*?)\n```", reasoning, re.DOTALL)
                         if code_match:
                             content = code_match.group(1)
                         else:
                             paragraphs = [p.strip() for p in reasoning.split("\n\n") if p.strip()]
-                            meta_markers = [
-                                "self-correction", "thinking process", "note:", "prompt asks", 
-                                "analyzing", "identifying", "identifying key", "draft the intent", 
-                                "refine for conciseness", "constraint:", "task:", "analyze the request",
-                                "output:", "rules:", "technical intent:", "output raw json only"
-                            ]
-
+                            meta_markers = ["self-correction", "thinking process", "note:", "prompt asks", "analyzing", "identifying", "identifying key", "draft the intent", "refine for conciseness", "constraint:", "task:"]
                             best_candidate = ""
                             for p in reversed(paragraphs):
                                 p_lower = p.lower()
-                                # Skip if it looks like meta-commentary or rule recitations
-                                if any(m in p_lower for m in meta_markers):
-                                    continue
-
-                                # Skip if it's too long and looks like an instruction list
-                                if len(p) > 400 and p.count("*") > 2:
-                                    continue
-
+                                if any(m in p_lower for m in meta_markers): continue
+                                if len(p) > 400 and p.count("*") > 2: continue
                                 best_candidate = p
                                 break                            
                             if best_candidate:
@@ -425,13 +386,17 @@ class ExecuteCommand(State):
     def __init__(self):
         super().__init__("EXECUTE_COMMAND")
 
-    def tick(self, command: str) -> Tuple[str, str]:
+    def tick(self, command: str, context: 'EngineContext') -> Tuple[str, str]:
         try:
             # shell=True for terminal-like behavior, timeout to prevent hanging
             result = subprocess.run(
                 command, shell=True, capture_output=True, text=True, timeout=120
             )
             output = f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+            
+            # Emit stdout event for UI
+            context.emit("STDOUT", {"text": output})
+            
             status = "SUCCESS" if result.returncode == 0 else "FAILURE"
             return status, output
         except subprocess.TimeoutExpired:
@@ -450,38 +415,25 @@ class PromptUser(State):
 
     def __init__(self):
         super().__init__("PROMPT_USER")
-        self.app = None # Set by engine if TUI is enabled
 
-    def tick(self, proposal: str) -> Tuple[str, bool]:
+    def tick(self, proposal: str, context: 'EngineContext') -> Tuple[str, bool]:
         import os
-        import threading
         
         if os.getenv("ARIADNE_AUTO_ACCEPT") == "true":
             logger.info("Auto-accepting proposal due to ARIADNE_AUTO_ACCEPT=true")
             return "ACCEPTED", True
 
-        if self.app:
-            # TUI Mode: Use message passing and wait for event
-            from .tui import PromptUserMessage
-            response_event = threading.Event()
-            response_container = {"approved": False}
+        # Emit event for UI to handle
+        context.emit("USER_PROMPT", {"proposal": proposal})
+        
+        # This blocks the engine thread until UI calls context.submit_user_response()
+        response = context.wait_for_user()
+        
+        if response is None:
+            return "REJECTED", False
             
-            self.app.post_message(PromptUserMessage(proposal, response_event, response_container))
-            
-            # This blocks the engine thread, but NOT the TUI thread
-            response_event.wait()
-            approved = response_container["approved"]
-            return "ACCEPTED" if approved else "REJECTED", approved
-        else:
-            # CLI Mode: Use standard input
-            print(f"\n[PROPOSAL]\n{proposal}\n")
-            while True:
-                choice = input("Proceed? (y/n): ").strip().lower()
-                if choice in ["y", "yes"]:
-                    return "ACCEPTED", True
-                if choice in ["n", "no"]:
-                    return "REJECTED", False
-                print("Please enter 'y' or 'n'.")
+        approved = response.get("approved", False) if isinstance(response, dict) else bool(response)
+        return "ACCEPTED" if approved else "REJECTED", approved
 
 
 class WriteFile(State):
@@ -494,7 +446,7 @@ class WriteFile(State):
     def __init__(self):
         super().__init__("WRITE_FILE")
 
-    def tick(self, payload: Dict[str, str]) -> Tuple[str, str]:
+    def tick(self, payload: Dict[str, str], context: 'EngineContext') -> Tuple[str, str]:
         filepath = payload.get("filepath")
         content = payload.get("content")
         try:
@@ -516,7 +468,7 @@ class ASTSplice(State):
     def __init__(self):
         super().__init__("AST_SPLICE")
 
-    def tick(self, payload: Dict[str, Any]) -> Tuple[str, str]:
+    def tick(self, payload: Dict[str, Any], context: 'EngineContext') -> Tuple[str, str]:
         filepath = payload.get("filepath")
         edits = payload.get("edits", [])
 
@@ -574,7 +526,7 @@ class BlockSplice(State):
     def __init__(self):
         super().__init__("BLOCK_SPLICE")
 
-    def tick(self, payload: Dict[str, Any]) -> Tuple[str, str]:
+    def tick(self, payload: Dict[str, Any], context: 'EngineContext') -> Tuple[str, str]:
         filepath = payload.get("filepath")
         edits = payload.get("edits", [])
 

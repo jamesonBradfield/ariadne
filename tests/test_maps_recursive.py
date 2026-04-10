@@ -35,7 +35,9 @@ def test_maps_comprehensive_session(temp_rust_file):
     config_manager.render_prompt.side_effect = lambda template, vars: template
 
     # Setup profile
+    from ariadne.core import EngineContext
     profile = RustProfile()
+    context = EngineContext("MAPS_NAV", intent="refactor main", target_files=[temp_rust_file], profile=profile)
 
     # Instantiate states
     nav_state = MAPS_NAV(config_manager, profile)
@@ -68,33 +70,33 @@ def test_maps_comprehensive_session(temp_rust_file):
         
         # 1. NAV: ZOOM into block
         mock_instance.tick.return_value = ("SUCCESS", MapsNavResponse(reasoning="r", action="zoom", target_id="2"))
-        status, _ = nav_state.tick(job)
+        status, _ = nav_state.tick(job, context)
         assert status == "MAPS_NAV"
         assert len(job.maps_state["navigation_stack"]) == 2
         
         # 2. NAV: ZOOM into first let
         mock_instance.tick.return_value = ("SUCCESS", MapsNavResponse(reasoning="r", action="zoom", target_id="0"))
-        status, _ = nav_state.tick(job)
+        status, _ = nav_state.tick(job, context)
         assert len(job.maps_state["navigation_stack"]) == 3
         
         # 3. NAV: UP back to block
         mock_instance.tick.return_value = ("SUCCESS", MapsNavResponse(reasoning="r", action="up", target_id="2"))
-        status, _ = nav_state.tick(job)
+        status, _ = nav_state.tick(job, context)
         assert len(job.maps_state["navigation_stack"]) == 2
         
         # 4. NAV: SELECT first let
         mock_instance.tick.return_value = ("SUCCESS", MapsNavResponse(reasoning="r", action="select", target_id="0"))
-        status, _ = nav_state.tick(job)
+        status, _ = nav_state.tick(job, context)
         assert status == "MAPS_THINK"
         
         # 5. THINK: Draft fix
         mock_instance.tick.return_value = ("SUCCESS", MapsThinkResponse(reasoning="r", action="fix", draft_code="let x = 42;"))
-        status, _ = think_state.tick(job)
+        status, _ = think_state.tick(job, context)
         assert status == "MAPS_SURGEON"
         
         # 6. SURGEON: Format JSON
         mock_instance.tick.return_value = ("SUCCESS", MapsSurgeonResponse(reasoning="r", action="replace", code="let x = 42;"))
-        status, _ = surgeon_state.tick(job)
+        status, _ = surgeon_state.tick(job, context)
         assert status == "SYNTAX_GATE"
         assert len(job.fixed_code["edits"]) == 1
 

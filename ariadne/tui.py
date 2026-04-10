@@ -19,14 +19,10 @@ from rich.live import Live
 from rich.status import Status
 from rich.table import Table
 
+from .core import AriadneEvent
+
 # Global Console instance pointing to raw stdout to avoid recursion loops
 console = Console(file=sys.__stdout__)
-
-class StateTransitionMessage:
-    """Mock Textual message for engine compatibility."""
-    def __init__(self, state_name: str, retry_count: int = 0) -> None:
-        self.state_name = state_name
-        self.retry_count = retry_count
 
 class EngineLogMessage:
     def __init__(self, record: logging.LogRecord) -> None:
@@ -42,6 +38,11 @@ class ChatUpdateMessage:
         self.content = content
         self.style = style
 
+class StateTransitionMessage:
+    def __init__(self, state_name: str, retry_count: int = 0) -> None:
+        self.state_name = state_name
+        self.retry_count = retry_count
+
 class EditorMessage:
     def __init__(self, command: str, completion_event: threading.Event) -> None:
         self.command = command
@@ -53,38 +54,17 @@ class PromptUserMessage:
         self.response_event = response_event
         self.response_container = response_container
 
-class TextualLogHandler(logging.Handler):
-    def __init__(self, app: 'AriadneApp') -> None:
-        super().__init__()
-        self.app = app
-
-    def emit(self, record: logging.LogRecord) -> None:
-        self.app.post_message(EngineLogMessage(record))
-
-class RedirectOutput:
-    """Redirects stdout/stderr to the app via messages."""
-    def __init__(self, app: 'AriadneApp'):
-        self.app = app
-
-    def write(self, text: str):
-        if text.strip():
-            self.app.post_message(StdoutMessage(text))
-
-    def flush(self):
-        pass
-
 class AriadneApp:
     """
     A professional, Aider-style interface using prompt-toolkit and rich.
+    Now a pure consumer of EngineEvents.
     """
     def __init__(self, **kwargs):
         self.session = PromptSession()
         self.kb = KeyBindings()
         self.start_callback: Optional[Callable[[Dict[str, Any]], None]] = None
         self.engine_running = False
-        self.current_prompt_event: Optional[threading.Event] = None
-        self.current_prompt_container: Optional[Dict[str, bool]] = None
-        self.abort_event = threading.Event()
+        self.current_context = None # Set by engine.py
         
         # State tracking for display
         self.current_state = "IDLE"
@@ -100,29 +80,36 @@ class AriadneApp:
         })
 
     def call_from_thread(self, func: Callable, *args, **kwargs):
-        """
-        Compatibility method for Textual. Since Rich is thread-safe, 
-        we can often call directly, but we wrap it for consistency.
-        """
+        """Compatibility method for background threads."""
         func(*args, **kwargs)
 
-    def post_message(self, message: Any) -> None:
+    def post_message(self, event: Union[AriadneEvent, Any]) -> None:
         """
-        Mock of Textual's post_message. Routes messages to the appropriate handler method.
-        Since we aren't in a full-screen app, we handle these in the main or engine thread.
+        Routes incoming engine events to the appropriate UI handlers.
         """
-        if isinstance(message, StateTransitionMessage):
-            self.on_state_transition_message(message)
-        elif isinstance(message, EngineLogMessage):
-            self.on_engine_log_message(message)
-        elif isinstance(message, StdoutMessage):
-            self.on_stdout_message(message)
-        elif isinstance(message, PromptUserMessage):
-            self.on_prompt_user_message(message)
-        elif isinstance(message, EditorMessage):
-            self.on_editor_message(message)
-        elif isinstance(message, ChatUpdateMessage):
-            self.on_chat_update_message(message)
+        if not isinstance(event, AriadneEvent):
+            # Compatibility for legacy direct calls if any remain
+            return
+
+        etype = event.type
+        payload = event.payload
+
+        if etype == "STATE_CHANGE":
+            self.on_state_transition(payload)
+        elif etype == "LLM_STREAM":
+            # This is handled live by QueryLLM primitive using Live() 
+            # but we can also log it here if we want persistent chat history
+            pass
+        elif etype == "USER_PROMPT":
+            self.on_user_prompt(payload)
+        elif etype == "EDITOR_OPEN":
+            self.on_editor_open(payload)
+        elif etype == "PLAN_UPDATE":
+            self.update_plan(payload)
+        elif etype == "SURGEON_UPDATE":
+            self.update_surgeon(payload["symbol"], payload["code"], payload.get("edits"))
+        elif etype == "INTENT_UPDATE":
+            self.active_intent = payload["intent"]
 
     def run(self) -> None:
         """
@@ -276,41 +263,36 @@ class AriadneApp:
     def on_chat_update_message(self, message: ChatUpdateMessage) -> None:
         self.print_ariadne_msg(message.content, role=message.sender)
 
-    def on_state_transition_message(self, message: StateTransitionMessage) -> None:
-        self.current_state = message.state_name
-        self.retry_count = message.retry_count
+    def on_state_transition(self, payload: Dict[str, Any]) -> None:
+        self.current_state = payload["state"]
         
-        console.print(f"[dim] Transitioning to [bold magenta]{message.state_name}[/][/]")
+        console.print(f"[dim] Transitioning to [bold magenta]{self.current_state}[/][/]")
         
-        if message.state_name == "FINISH":
+        if self.current_state == "FINISH":
             self.engine_running = False
             self.print_system_msg("[bold green]Success! Task completed.[/]")
 
-    def on_prompt_user_message(self, message: PromptUserMessage) -> None:
-        self.current_prompt_event = message.response_event
-        self.current_prompt_container = message.response_container
-        
-        proposal_text = f"**PROPOSAL REVIEW REQUIRED**\n\n{message.proposal}\n\nDo you approve this? (yes/no)"
+    def on_user_prompt(self, payload: Dict[str, Any]) -> None:
+        # TUI is now in a mode where next input resolves this prompt
+        self.user_prompt_active = True
+        proposal = payload["proposal"]
+        proposal_text = f"**USER INTERVENTION REQUIRED**\n\n{proposal}\n\nDo you approve this? (yes/no)"
         self.print_ariadne_msg(proposal_text)
 
     def resolve_prompt(self, approved: bool) -> None:
-        if self.current_prompt_container and self.current_prompt_event:
-            self.current_prompt_container["approved"] = approved
-            self.current_prompt_event.set()
-            self.current_prompt_event = None
-            self.current_prompt_container = None
-            self.print_system_msg("Approved. Continuing..." if approved else "Rejected.")
+        if self.current_context:
+            self.user_prompt_active = False
+            self.current_context.submit_user_response({"approved": approved})
+            self.print_system_msg("Response submitted. Continuing..." if approved else "Rejected.")
 
-    def on_editor_message(self, message: EditorMessage) -> None:
-        self.print_system_msg("Launching external editor...")
-        # Since we use patch_stdout, we can just run the command
+    def on_editor_open(self, payload: Dict[str, Any]) -> None:
+        command = payload["command"]
+        self.print_system_msg(f"Launching external editor: [cyan]{command}[/]")
         try:
-            subprocess.run(shlex.split(message.command))
+            subprocess.run(shlex.split(command))
         except Exception as e:
             logging.error(f"Failed to run editor: {e}")
-        finally:
-            message.completion_event.set()
-        self.print_system_msg("Resuming...")
+        self.print_system_msg("Editor closed. Resuming...")
 
     # Compatibility methods for engine.py
     def update_intent(self, intent: str) -> None:

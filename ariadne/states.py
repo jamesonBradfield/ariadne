@@ -7,7 +7,7 @@ import re
 import json
 import threading
 from typing import Any, Tuple, Dict, List, Optional, Union
-from .core import State
+from .core import State, EngineContext
 from .payloads import (
     JobPayload, RouterResponse, DispatchResponse, ThinkingResponse, 
     MapsNavResponse, MapsThinkResponse, MapsSurgeonResponse,
@@ -19,7 +19,7 @@ from .components import TreeSitterSensor
 
 logger = logging.getLogger("ariadne.states")
 
-def record_interaction(job: JobPayload, state: str, system: str, user: str, response: Any):
+def record_interaction(context: EngineContext, state: str, system: str, user: str, response: Any):
     """Logs an LLM interaction to the job history for self-optimization."""
     from .payloads import InteractionTrace
     
@@ -36,7 +36,7 @@ def record_interaction(job: JobPayload, state: str, system: str, user: str, resp
         user_prompt=user,
         response=resp_str
     )
-    job.interaction_history.append(trace)
+    context.interaction_history.append(trace)
 
 class TRIAGE(State):
     """
@@ -46,12 +46,12 @@ class TRIAGE(State):
         super().__init__("TRIAGE")
         self.config_manager = config_manager
 
-    def tick(self, payload: Union[JobPayload, Dict[str, Any]]) -> Tuple[str, JobPayload]:
+    def tick(self, payload: Union[JobPayload, Dict[str, Any]], context: EngineContext) -> Tuple[str, JobPayload]:
         logger.info("Triaging intent...")
         
         # Normalize to dict for easy access if needed
-        is_job = hasattr(payload, "intent")
-        intent_val = payload.intent if is_job else payload.get("intent", "")
+        is_job = isinstance(payload, JobPayload)
+        intent_val = context.intent
         input_val = intent_val or (payload.get("input", "") if not is_job else "")
 
         model_info = self.config_manager.get_model_info("TRIAGE")
@@ -68,16 +68,16 @@ class TRIAGE(State):
             "system": system_prompt,
             "user": user_prompt,
             "params": model_info.get("params", {})
-        })
+        }, context)
 
         if status != "SUCCESS":
              # Error handling
-             return "ABORT", (payload if is_job else JobPayload(intent="Failed to triage"))
+             return "ABORT", (payload if is_job else JobPayload())
 
         # Handle LLM refusals
         if "I cannot" in technical_intent or "I am an AI" in technical_intent:
             logger.error("LLM refused to triage the intent. Check prompts or model safety settings.")
-            return "ABORT", (payload if is_job else JobPayload(intent=f"LLM Refusal: {technical_intent}"))
+            return "ABORT", (payload if is_job else JobPayload(llm_feedback=f"LLM Refusal: {technical_intent}"))
 
         # AMNESIA CHECK: If the LLM echoed instructions, discard it
         clean_intent = technical_intent.strip()
@@ -85,18 +85,13 @@ class TRIAGE(State):
             logger.warning("TRIAGE generated noisy or mirrored output. Discarding and using original user input.")
             clean_intent = input_val
 
+        # Update global intent in context
+        context.intent = clean_intent
+        
         if is_job:
-            payload.intent = clean_intent
             return "DISPATCH", payload
         
-        job = JobPayload(
-            intent=clean_intent,
-            target_files=payload.get("target_files", [])
-        )
-        # Preserve app reference
-        job.app = payload.get("app")
-
-        return "DISPATCH", job
+        return "DISPATCH", JobPayload()
 
 
 class DISPATCH(State):
@@ -111,7 +106,7 @@ class DISPATCH(State):
         self.target_files = target_files
         self.prompt_user = PromptUser()
 
-    def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
+    def tick(self, job: JobPayload, context: EngineContext) -> Tuple[str, JobPayload]:
         logger.info(f"Generating test contract for {self.profile.name}...")
 
         skeletons = []
@@ -134,12 +129,8 @@ class DISPATCH(State):
         system_prompt = self.config_manager.render_prompt(state_config["system_prompt"], {"language": self.profile.name})
         user_prompt = self.config_manager.render_prompt(
             state_config["user_prompt_template"],
-            {"intent": job.intent, "skeleton_context": skeleton_context, "language": self.profile.name}
+            {"intent": context.intent, "skeleton_context": skeleton_context, "language": self.profile.name}
         )
-
-        # Inject app into prompt_user for TUI support
-        if job.app:
-            self.prompt_user.app = job.app
 
         query = QueryLLM(model=model_info.get("model"), api_base=model_info.get("api_base"))
         status, result = query.tick({
@@ -147,7 +138,7 @@ class DISPATCH(State):
             "user": user_prompt,
             "params": model_info.get("params", {}),
             "response_model": DispatchResponse
-        })
+        }, context)
         
         if status != "SUCCESS":
             return "ABORT", job
@@ -159,17 +150,17 @@ class DISPATCH(State):
         if standard_headers and standard_headers not in test_code:
             test_code = f"{standard_headers}\n{test_code}"
 
-        record_interaction(job, "DISPATCH", system_prompt, user_prompt, result)
+        record_interaction(context, "DISPATCH", system_prompt, user_prompt, result)
 
         proposal = f"Proposed Test Code ({self.test_filepath}):\n\n{test_code}"
-        status, approved = self.prompt_user.tick(proposal)
+        status, approved = self.prompt_user.tick(proposal, context)
 
         if not approved:
             logger.warning("User rejected the test contract. Aborting.")
             return "ABORT", job
 
         writer = WriteFile()
-        writer.tick({"filepath": self.test_filepath, "content": test_code})
+        writer.tick({"filepath": self.test_filepath, "content": test_code}, context)
         
         job.test_code = test_code
         return "EVALUATE", job
@@ -204,11 +195,11 @@ class EVALUATE(State):
             
         return None, None
 
-    def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
+    def tick(self, job: JobPayload, context: EngineContext) -> Tuple[str, JobPayload]:
         logger.info(f"Executing test suite: {self.test_command}")
         
         executor = ExecuteCommand()
-        status, output = executor.tick(self.test_command)
+        status, output = executor.tick(self.test_command, context)
         
         # Truncate output to prevent context overflow in subsequent LLM states
         if len(output) > 5000:
@@ -240,25 +231,14 @@ class INTERVENE(State):
         super().__init__("INTERVENE")
         self.config_manager = config_manager
 
-    def _open_editor(self, command: str, job: JobPayload) -> None:
-        """Helper to open editor safely in TUI or CLI mode."""
-        if job.app:
-            from .tui import EditorMessage
-            completion_event = threading.Event()
-            job.app.post_message(EditorMessage(command, completion_event))
-            completion_event.wait()
-        else:
-            subprocess.run(shlex.split(command))
-
-    def tick(self, payload: Union[JobPayload, Dict[str, Any]]) -> Tuple[str, JobPayload]:
+    def tick(self, payload: Union[JobPayload, Dict[str, Any]], context: EngineContext) -> Tuple[str, JobPayload]:
         # Normalize to JobPayload if it's a dict (initial state scenario)
         if isinstance(payload, dict):
             job = JobPayload(
                 intent=payload.get("intent", ""),
                 target_files=payload.get("target_files", []),
                 needs_elaboration=payload.get("needs_elaboration", False),
-                next_headless_state=payload.get("next_headless_state", "ROUTER"),
-                app=payload.get("app")
+                next_headless_state=payload.get("next_headless_state", "ROUTER")
             )
         else:
             job = payload
@@ -282,7 +262,7 @@ class INTERVENE(State):
                 job.needs_elaboration = False
                 return "TRIAGE", job
 
-            original_intent = job.intent
+            original_intent = context.intent
             with tempfile.NamedTemporaryFile(suffix=".md", mode='w', encoding='utf-8', delete=False) as tf:
                 tf.write("# Ariadne Intent Elaboration\n")
                 tf.write("Edit the text below to refine your coding objective.\n")
@@ -294,17 +274,12 @@ class INTERVENE(State):
             cmd = command_template.format(line=5, file=temp_path)
             
             if headless:
-                logger.info(f"Sending intent to remote editor via RPC: {cmd}")
-                # Use shell=True on Windows to handle command templates more naturally
-                subprocess.run(cmd, shell=True)
-                print("\n" + "!"*60)
-                print("ACTION REQUIRED: Intent file sent to remote editor.")
-                print(f"File: {temp_path}")
-                input("Press ENTER here when you have SAVED and CLOSED the file in your editor...")
-                print("!"*60 + "\n")
+                # Emit event instead of direct subprocess if possible, or just emit and wait
+                context.emit("EDITOR_OPEN", {"command": cmd, "file": temp_path})
+                context.emit("USER_PROMPT", {"proposal": f"Please edit the intent file: {temp_path}\nPress 'yes' when done."})
+                context.wait_for_user()
             else:
-                logger.info(f"Opening editor for intent elaboration: {cmd}")
-                self._open_editor(cmd, job)
+                context.emit("EDITOR_OPEN", {"command": cmd, "file": temp_path, "blocking": True})
             
             with open(temp_path, 'r', encoding='utf-8') as f:
                 content = f.read()
@@ -313,7 +288,7 @@ class INTERVENE(State):
             
             os.unlink(temp_path)
             
-            job.intent = new_intent if new_intent else original_intent
+            context.intent = new_intent if new_intent else original_intent
             job.needs_elaboration = False
                 
             return "TRIAGE", job
@@ -329,16 +304,9 @@ class INTERVENE(State):
             line = job.failing_line or "1"
             cmd = command_template.format(line=line, file=job.failing_file)
             
-            if headless:
-                logger.info(f"Sending failing file to remote editor via RPC: {cmd}")
-                subprocess.run(cmd, shell=True)
-                print("\n" + "="*60)
-                print(f"Action Required: File opened in your remote editor via RPC: {job.failing_file}")
-                input("Press Enter here in the terminal when you are done making changes...")
-                print("="*60 + "\n")
-            else:
-                logger.info(f"Opening editor for manual fix: {cmd}")
-                self._open_editor(cmd, job)
+            context.emit("EDITOR_OPEN", {"command": cmd, "file": job.failing_file})
+            context.emit("USER_PROMPT", {"proposal": f"File opened in your editor: {job.failing_file}\nPress 'yes' when you are done making changes."})
+            context.wait_for_user()
             
             job.failing_file = None
             job.failing_line = None
@@ -357,11 +325,11 @@ class THINKING(State):
         self.config_manager = config_manager
         self.profile = profile
 
-    def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
+    def tick(self, job: JobPayload, context: EngineContext) -> Tuple[str, JobPayload]:
         logger.info("Architecting repair plan...")
 
         skeletons = []
-        for f in job.target_files:
+        for f in context.target_files:
             if not os.path.exists(f): continue
             status, result = self.profile.get_skeleton(f)
             if status == "SUCCESS":
@@ -373,7 +341,7 @@ class THINKING(State):
                 except Exception: pass
         
         skeleton_context = "\n\n".join(skeletons)
-        symbols = self.profile.get_available_symbols(job.target_files)
+        symbols = self.profile.get_available_symbols(context.target_files, context)
 
         model_info = self.config_manager.get_model_info("THINKING")
         state_config = self.config_manager.config["states"]["THINKING"]
@@ -381,7 +349,7 @@ class THINKING(State):
         user_prompt = self.config_manager.render_prompt(
             state_config["user_prompt_template"],
             {
-                "intent": job.intent,
+                "intent": context.intent,
                 "test_code": job.test_code,
                 "test_stdout": job.test_stdout,
                 "available_symbols": json.dumps(symbols),
@@ -395,14 +363,9 @@ class THINKING(State):
             "user": user_prompt,
             "params": model_info.get("params", {}),
             "response_model": ThinkingResponse
-        })
+        }, context)
         
-        record_interaction(job, "THINKING", state_config["system_prompt"], user_prompt, plan)
-
-        # LIVE OPTIMIZATION: Catch "Struct-Traps" early
-        # if optimize_state_prompt(self.config_manager, "THINKING", user_prompt, plan):
-        #     job.llm_feedback = "The Architect's plan was flawed (likely targeting a struct for a method). Retrying with better rules..."
-        #     return "THINKING", job
+        record_interaction(context, "THINKING", state_config["system_prompt"], user_prompt, plan)
 
         if status != "SUCCESS":
             return "ROUTER", job
@@ -421,7 +384,7 @@ class ROUTER(State):
         super().__init__("ROUTER")
         self.config_manager = config_manager
 
-    def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
+    def tick(self, job: JobPayload, context: EngineContext) -> Tuple[str, JobPayload]:
         logger.info("Routing to next state...")
 
         model_info = self.config_manager.get_model_info("ROUTER")
@@ -430,7 +393,7 @@ class ROUTER(State):
         user_prompt = self.config_manager.render_prompt(
             state_config["user_prompt_template"],
             {
-                "intent": job.intent,
+                "intent": context.intent,
                 "retry_count": job.retry_count,
                 "test_stdout": job.test_stdout,
                 "llm_feedback": job.llm_feedback or "None",
@@ -445,9 +408,9 @@ class ROUTER(State):
             "user": user_prompt,
             "params": model_info.get("params", {}),
             "response_model": RouterResponse
-        })
+        }, context)
         
-        record_interaction(job, "ROUTER", state_config["system_prompt"], user_prompt, decision)
+        record_interaction(context, "ROUTER", state_config["system_prompt"], user_prompt, decision)
 
         if status != "SUCCESS":
             logger.warning(f"Router received invalid response ({status}). Attempting recovery...")
@@ -475,7 +438,7 @@ class SEARCH(State):
         self.config_manager = config_manager
         self.profile = profile
 
-    def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
+    def tick(self, job: JobPayload, context: EngineContext) -> Tuple[str, JobPayload]:
         logger.info("Preparing Surgeon work list...")
         
         if not job.plan or not getattr(job.plan, "steps", None):
@@ -500,7 +463,7 @@ class SENSE(State):
         super().__init__("SENSE")
         self.profile = profile
 
-    def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
+    def tick(self, job: JobPayload, context: EngineContext) -> Tuple[str, JobPayload]:
         idx = job.maps_state.get("current_step_index", 0)
         steps = job.maps_state.get("steps", [])
         
@@ -515,18 +478,18 @@ class SENSE(State):
         
         # SEARCH for the symbol's CURRENT location on disk
         found_nodes = []
-        for filepath in job.target_files:
+        for filepath in context.target_files:
             if not os.path.exists(filepath): continue
             try:
                 # NEW: If adding a method, sense the PARENT of the anchor to avoid Navigation Ceiling
-                is_addition = any(x in job.intent.lower() for x in ["add", "implement", "create", "new"])
+                is_addition = any(x in context.intent.lower() for x in ["add", "implement", "create", "new"])
                 
-                status, nodes = self.profile.find_symbol(filepath, symbol)
+                status, nodes = self.profile.find_symbol(filepath, symbol, context)
                 if status == "SUCCESS" and nodes:
                     for node in nodes:
                         if is_addition:
                             logger.info(f"Addition detected. Bubbling up SENSE to parent of {symbol}...")
-                            status_p, parent = self.profile.get_parent_block(filepath, node["start_byte"])
+                            status_p, parent = self.profile.get_parent_block(filepath, node["start_byte"], context)
                             if status_p == "SUCCESS" and parent:
                                 found_nodes.append({
                                     "filepath": filepath,
@@ -580,7 +543,7 @@ class MAPS_NAV(State):
         self.config_manager = config_manager
         self.profile = profile
 
-    def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
+    def tick(self, job: JobPayload, context: EngineContext) -> Tuple[str, JobPayload]:
         if not job.extracted_nodes:
             return "SENSE", job
 
@@ -617,7 +580,7 @@ class MAPS_NAV(State):
         user_prompt = self.config_manager.render_prompt(
             state_config["user_prompt_template"],
             {
-                "intent": job.intent,
+                "intent": context.intent,
                 "current_symbol": current_symbol,
                 "error_context": getattr(job, "llm_feedback", "") or "",
                 "ast_view": ast_view
@@ -630,9 +593,9 @@ class MAPS_NAV(State):
             "user": user_prompt,
             "params": model_info.get("params", {}),
             "response_model": MapsNavResponse
-        })
+        }, context)
         
-        record_interaction(job, "MAPS_NAV", state_config["system_prompt"], user_prompt, result)
+        record_interaction(context, "MAPS_NAV", state_config["system_prompt"], user_prompt, result)
 
         if status != "SUCCESS":
             job.llm_feedback = f"Failed to get structured navigation response: {result}"
@@ -696,7 +659,7 @@ class MAPS_THINK(State):
         self.config_manager = config_manager
         self.profile = profile
 
-    def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
+    def tick(self, job: JobPayload, context: EngineContext) -> Tuple[str, JobPayload]:
         filepath = job.fixed_code["filepath"]
         start_byte, end_byte = job.maps_state["locked_range"]
         
@@ -729,7 +692,7 @@ class MAPS_THINK(State):
         user_prompt = self.config_manager.render_prompt(
             state_config["user_prompt_template"],
             {
-                "intent": job.intent,
+                "intent": context.intent,
                 "current_symbol": current_symbol,
                 "error_context": error_context,
                 "node_snippet": node_snippet,
@@ -744,9 +707,9 @@ class MAPS_THINK(State):
             "user": user_prompt,
             "params": model_info.get("params", {}),
             "response_model": MapsThinkResponse
-        })
+        }, context)
         
-        record_interaction(job, "MAPS_THINK", state_config["system_prompt"], user_prompt, result)
+        record_interaction(context, "MAPS_THINK", state_config["system_prompt"], user_prompt, result)
 
         if status != "SUCCESS":
             job.llm_feedback = f"Failed to get structured diagnosis: {result}"
@@ -776,7 +739,7 @@ class MAPS_SURGEON(State):
         self.config_manager = config_manager
         self.profile = profile
 
-    def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
+    def tick(self, job: JobPayload, context: EngineContext) -> Tuple[str, JobPayload]:
         model_info = self.config_manager.get_model_info("MAPS_SURGEON")
         state_config = self.config_manager.config["states"]["MAPS_SURGEON"]
 
@@ -799,9 +762,9 @@ class MAPS_SURGEON(State):
             "user": user_prompt,
             "params": model_info.get("params", {}),
             "response_model": MapsSurgeonResponse
-        })
+        }, context)
         
-        record_interaction(job, "MAPS_SURGEON", state_config["system_prompt"], user_prompt, result)
+        record_interaction(context, "MAPS_SURGEON", state_config["system_prompt"], user_prompt, result)
 
         if status != "SUCCESS":
             job.llm_feedback = f"Failed to get structured surgical command: {result}"
@@ -855,7 +818,7 @@ class SYNTAX_GATE(State):
         super().__init__("SYNTAX_GATE")
         self.profile = profile
 
-    def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
+    def tick(self, job: JobPayload, context: EngineContext) -> Tuple[str, JobPayload]:
         logger.info("Validating syntax of proposed repair...")
         
         if not job.fixed_code or not job.fixed_code.get("edits"):
@@ -897,7 +860,7 @@ class ACTUATE(State):
     def __init__(self):
         super().__init__("ACTUATE")
 
-    def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
+    def tick(self, job: JobPayload, context: EngineContext) -> Tuple[str, JobPayload]:
         logger.info("Actuating surgical edits to disk...")
         
         if not job.fixed_code:
@@ -905,7 +868,7 @@ class ACTUATE(State):
             return "SENSE", job
 
         splicer = BlockSplice()
-        status, result = splicer.tick(job.fixed_code)
+        status, result = splicer.tick(job.fixed_code, context)
 
         if status == "SUCCESS":
             # Successfully edited one symbol. Move to the next.
@@ -928,11 +891,11 @@ class POST_MORTEM(State):
         super().__init__("POST_MORTEM")
         self.config_manager = config_manager
 
-    def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
+    def tick(self, job: JobPayload, context: EngineContext) -> Tuple[str, JobPayload]:
         logger.info("Repair session complete. summarized results.")
         
         # Self-Optimization Trigger: If we failed or had high retries
-        if (job.retry_count > 3 or job.llm_feedback) and job.interaction_history:
+        if (job.retry_count > 3 or job.llm_feedback) and context.interaction_history:
             logger.info("High retry count or feedback detected. Generating self-optimization case...")
             
             model_info = self.config_manager.get_model_info("POST_MORTEM")
@@ -940,7 +903,7 @@ class POST_MORTEM(State):
             
             # Format history for the LLM - Limit to last 5 to keep context clean
             history_str = ""
-            visible_history = job.interaction_history[-5:]
+            visible_history = context.interaction_history[-5:]
             for i, trace in enumerate(visible_history):
                 history_str += f"\n--- Interaction {i} ({trace.state}) ---\n"
                 history_str += f"System: {trace.system_prompt[:200]}...\n"
@@ -958,7 +921,7 @@ class POST_MORTEM(State):
                 "user": user_prompt,
                 "params": model_info.get("params", {}),
                 "response_model": SelfOptimizationResponse
-            })
+            }, context)
 
             if status == "SUCCESS":
                 case_file = "tests/llm_cases.json"

@@ -72,7 +72,7 @@ class BaseProfile(ABC):
         pass
 
     @abstractmethod
-    def get_parent_block(self, filepath: str, byte_offset: int) -> Tuple[str, Optional[Dict[str, Any]]]:
+    def get_parent_block(self, filepath: str, byte_offset: int, context: 'EngineContext') -> Tuple[str, Optional[Dict[str, Any]]]:
         """Finds the nearest 'logical parent' (class/impl/mod) containing a byte."""
         pass
 
@@ -87,7 +87,7 @@ class BaseProfile(ABC):
             logger.error(f"Failed to generate skeleton for {filepath}: {e}")
             return "ERROR", str(e)
 
-    def find_symbol(self, filepath: str, symbol_name: str) -> Tuple[str, List[Dict[str, Any]]]:
+    def find_symbol(self, filepath: str, symbol_name: str, context: 'EngineContext') -> Tuple[str, List[Dict[str, Any]]]:
         """Finds all occurrences of a symbol in a file, preferring ast-grep if available."""
         if self.ast_grep_lang:
             from ariadne.primitives import QueryAstGrep
@@ -95,15 +95,11 @@ class BaseProfile(ABC):
             patterns = self.get_symbol_patterns(symbol_name)
             all_matches = []
             for pattern in patterns:
-                status, matches = querier.tick({"filepath": filepath, "pattern": pattern})
+                status, matches = querier.tick({"filepath": filepath, "pattern": pattern}, context)
                 if status == "SUCCESS":
-                    # Filter matches by checking if the text actually contains the symbol name 
-                    # (ast-grep patterns like 'fn $NAME' might be too broad if not careful)
-                    # But here we assume patterns are specific enough or we rely on ast-grep's precision.
                     all_matches.extend(matches)
             
             if all_matches:
-                # Normalize to Tree-sitter node format used by states
                 normalized = []
                 for m in all_matches:
                     normalized.append({
@@ -114,7 +110,6 @@ class BaseProfile(ABC):
                     })
                 return "SUCCESS", normalized
 
-        # Fallback to Tree-sitter
         try:
             with open(filepath, "rb") as f:
                 source = f.read()
@@ -125,7 +120,7 @@ class BaseProfile(ABC):
             logger.error(f"Failed to find symbol {symbol_name} in {filepath}: {e}")
             return "ERROR", []
 
-    def get_available_symbols(self, filepaths: List[str]) -> List[str]:
+    def get_available_symbols(self, filepaths: List[str], context: 'EngineContext') -> List[str]:
         """Returns a list of all function/class symbols available in the targets."""
         if self.ast_grep_lang:
             from ariadne.primitives import QueryAstGrep
@@ -140,7 +135,7 @@ class BaseProfile(ABC):
                         "filepath": filepath, 
                         "pattern": pattern,
                         "vars": [meta_var]
-                    })
+                    }, context)
                     if status == "SUCCESS":
                         for m in matches:
                             name = m.get("vars", {}).get(meta_var)
@@ -148,5 +143,100 @@ class BaseProfile(ABC):
                                 all_symbols.add(name)
             return list(all_symbols)
 
-        # Fallback (empty or implemented in profiles)
         return []
+
+
+class DynamicProfile(BaseProfile):
+    """
+    A data-driven profile that loads its configuration from JSON.
+    """
+
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__()
+        self._config = config
+        self._language_ptr = None
+
+    @property
+    def name(self) -> str:
+        return self._config.get("name", "Unknown")
+
+    @property
+    def extensions(self) -> List[str]:
+        return self._config.get("extensions", [])
+
+    def get_standard_headers(self) -> str:
+        return self._config.get("standard_headers", "")
+
+    def get_language_ptr(self) -> Any:
+        if self._language_ptr is None:
+            lang_id = self._config.get("language_id")
+            if not lang_id:
+                raise ValueError(f"Profile '{self.name}' missing 'language_id'")
+            
+            # Try to dynamically import the language package
+            # e.g., language_id='rust' -> import tree_sitter_rust
+            pkg_name = f"tree_sitter_{lang_id}"
+            try:
+                import importlib
+                module = importlib.import_module(pkg_name)
+                # Usually has a .language() or similarly named function
+                # Some might use .language() some might use .language_id()
+                # tree_sitter_rust uses .language()
+                if hasattr(module, "language"):
+                    self._language_ptr = module.language()
+                else:
+                    # Fallback for older patterns
+                    self._language_ptr = getattr(module, lang_id)()
+            except ImportError:
+                logger.error(f"Failed to import tree-sitter package: {pkg_name}")
+                raise
+        return self._language_ptr
+
+    @property
+    def ast_grep_lang(self) -> Optional[str]:
+        return self._config.get("ast_grep_lang")
+
+    def get_skeleton_query(self) -> str:
+        return self._config.get("tree_sitter_queries", {}).get("skeleton", "")
+
+    def get_symbol_patterns(self, symbol_name: str) -> List[str]:
+        patterns = self._config.get("ast_grep_patterns", {}).get("symbol", [])
+        return [p.replace("{symbol_name}", symbol_name) for p in patterns]
+
+    def get_all_symbols_patterns(self) -> List[Tuple[str, str]]:
+        patterns = self._config.get("ast_grep_patterns", {}).get("all_symbols", [])
+        # Expects list of [pattern, var]
+        return [(p[0], p[1]) for p in patterns]
+
+    def get_symbol_query(self, symbol_name: str) -> str:
+        query = self._config.get("tree_sitter_queries", {}).get("symbol", "")
+        return query.replace("{symbol_name}", symbol_name)
+
+    @property
+    def symbol_capture_name(self) -> str:
+        return self._config.get("symbol_capture_name", "symbol")
+
+    def get_parent_block(self, filepath: str, byte_offset: int, context: 'EngineContext') -> Tuple[str, Optional[Dict[str, Any]]]:
+        try:
+            with open(filepath, "rb") as f:
+                source = f.read()
+            
+            tree = self.sensor.parser.parse(source)
+            node = tree.root_node.descendant_for_byte_range(byte_offset, byte_offset)
+            
+            parent_types = self._config.get("parent_block_types", [])
+            
+            curr = node
+            while curr:
+                if curr.type in parent_types:
+                    return "SUCCESS", {
+                        "code": curr.text.decode("utf-8"),
+                        "start_byte": curr.start_byte,
+                        "end_byte": curr.end_byte,
+                        "type": curr.type
+                    }
+                curr = curr.parent
+            return "ERROR", None
+        except Exception as e:
+            logger.error(f"get_parent_block error: {e}")
+            return "ERROR", None
