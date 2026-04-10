@@ -71,6 +71,11 @@ class BaseProfile(ABC):
         """The Tree-sitter capture name for target symbols (e.g., 'function')."""
         pass
 
+    @abstractmethod
+    def get_parent_block(self, filepath: str, byte_offset: int) -> Tuple[str, Optional[Dict[str, Any]]]:
+        """Finds the nearest 'logical parent' (class/impl/mod) containing a byte."""
+        pass
+
     def get_skeleton(self, filepath: str) -> Tuple[str, str]:
         """Generates a skeleton of the file by stripping function bodies."""
         try:

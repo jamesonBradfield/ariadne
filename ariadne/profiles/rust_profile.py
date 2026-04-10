@@ -1,5 +1,5 @@
 import tree_sitter_rust as tsrust
-from typing import Any, List, Dict, Tuple
+from typing import Any, List, Dict, Tuple, Optional
 from .base import BaseProfile
 
 class RustProfile(BaseProfile):
@@ -82,3 +82,27 @@ class RustProfile(BaseProfile):
     @property
     def symbol_capture_name(self) -> str:
         return "symbol"
+
+    def get_parent_block(self, filepath: str, byte_offset: int) -> Tuple[str, Optional[Dict[str, Any]]]:
+        """Finds the nearest impl_item or mod_item containing the byte."""
+        try:
+            with open(filepath, "rb") as f:
+                source = f.read()
+            
+            tree = self.sensor.parser.parse(source)
+            node = tree.root_node.descendant_for_byte_range(byte_offset, byte_offset)
+            
+            # Walk up to find impl_item, mod_item, or trait_item
+            curr = node
+            while curr:
+                if curr.type in ["impl_item", "mod_item", "trait_item", "declaration_list"]:
+                    return "SUCCESS", {
+                        "code": curr.text.decode("utf-8"),
+                        "start_byte": curr.start_byte,
+                        "end_byte": curr.end_byte,
+                        "type": curr.type
+                    }
+                curr = curr.parent
+            return "ERROR", None
+        except Exception as e:
+            return "ERROR", None

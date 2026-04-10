@@ -153,7 +153,14 @@ class IgnoreHandler:
         return any(pattern in path for pattern in self.ignore_patterns)
 
 
-def run_engine_loop(context: EngineContext, states_registry: Dict[str, State], initial_payload: Any, app: Optional[AriadneApp] = None):
+def run_engine_loop(
+    context: EngineContext, 
+    states_registry: Dict[str, State], 
+    initial_payload: Any, 
+    app: Optional[AriadneApp] = None,
+    max_turns: int = 40,
+    global_timeout: int = 1800
+):
     """
     Executes the HFSM loop. Can be run in a background thread.
     """
@@ -166,15 +173,14 @@ def run_engine_loop(context: EngineContext, states_registry: Dict[str, State], i
     start_wall_time = time.time()
     turn_count = 0
     
-    # Defaults
-    max_turns = 20
-    global_timeout = 1800
-    
+    # Try to override from CLI args if they exist and werent passed explicitly
     try:
         import __main__
         if hasattr(__main__, 'args'):
-            max_turns = getattr(__main__.args, 'max_turns', 20)
-            global_timeout = getattr(__main__.args, 'timeout', 1800)
+            if max_turns == 40: # Only override if using default
+                max_turns = getattr(__main__.args, 'max_turns', 40)
+            if global_timeout == 1800:
+                global_timeout = getattr(__main__.args, 'timeout', 1800)
     except Exception:
         pass
 
@@ -258,7 +264,7 @@ def main():
     parser.add_argument("--tui", action="store_true", help="Enable the Textual Dashboard TUI")
     parser.add_argument("--headless", action="store_true", help="Run without interactive editor interventions")
     parser.add_argument("--project-dir", "-C", default=".", help="Set the project working directory")
-    parser.add_argument("--max-turns", type=int, default=20, help="Maximum transitions before aborting")
+    parser.add_argument("--max-turns", type=int, default=40, help="Maximum transitions before aborting")
     parser.add_argument("--timeout", type=int, default=1800, help="Global timeout in seconds")
     args = parser.parse_args()
 

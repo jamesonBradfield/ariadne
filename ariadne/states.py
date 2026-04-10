@@ -518,9 +518,26 @@ class SENSE(State):
         for filepath in job.target_files:
             if not os.path.exists(filepath): continue
             try:
+                # NEW: If adding a method, sense the PARENT of the anchor to avoid Navigation Ceiling
+                is_addition = any(x in job.intent.lower() for x in ["add", "implement", "create", "new"])
+                
                 status, nodes = self.profile.find_symbol(filepath, symbol)
                 if status == "SUCCESS" and nodes:
                     for node in nodes:
+                        if is_addition:
+                            logger.info(f"Addition detected. Bubbling up SENSE to parent of {symbol}...")
+                            status_p, parent = self.profile.get_parent_block(filepath, node["start_byte"])
+                            if status_p == "SUCCESS" and parent:
+                                found_nodes.append({
+                                    "filepath": filepath,
+                                    "symbol": symbol,
+                                    "node_string": parent["code"],
+                                    "start_byte": parent["start_byte"],
+                                    "end_byte": parent["end_byte"],
+                                    "node_type": parent["type"]
+                                })
+                                continue
+
                         found_nodes.append({
                             "filepath": filepath,
                             "symbol": symbol,

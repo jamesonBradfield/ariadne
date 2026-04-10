@@ -32,35 +32,35 @@
       }
     },
     "THINKING": {
-      "system_prompt": "You are an Architect. Create a repair plan. Output ONLY a JSON object. Do not reason.\n\nRule: If ADDING a method, you MUST pick an EXISTING symbol from 'Available Symbols' to serve as an anchor.\n\nExample Output:\n{\"reasoning\": \"Adding missing method, using init as anchor.\", \"steps\": [{\"symbol\": \"init\"}]}[TURN_DONE]",
+      "system_prompt": "Task: Create a logical repair plan. Output ONLY a JSON object. Do not reason. Rule: If ADDING a method, you MUST pick an EXISTING symbol from 'Available Symbols' to serve as an anchor.\n\nExample Output:\n{\"reasoning\": \"Adding missing method, using init as anchor.\", \"steps\": [{\"symbol\": \"init\"}]}[TURN_DONE]",
       "user_prompt_template": "Intent: {{intent}}\nTest Code: {{test_code}}\nErrors: {{test_stdout}}\nAvailable: {{available_symbols}}\nSkeletons: {{skeletons}}",
       "params": {
         "max_tokens": 4096
       }
     },
     "MAPS_NAV": {
-      "system_prompt": "You are a surgical navigator. Output ONLY a JSON object. Do not reason.\n\nRule: If you see the node you want to edit (or the list where you want to insert code), use 'select' immediately. Do not over-zoom.\n\nValid actions: [zoom, up, select].\n\nExample Output:\n{\"reasoning\": \"Target block visible, selecting.\", \"action\": \"select\", \"target_id\": \"1\"}[TURN_DONE]",
+      "system_prompt": "Task: Navigate AST. Output ONLY a JSON object. Do not reason. Rule: If you see the node you want to edit (or the list where you want to insert code), use 'select' immediately. Do not over-zoom. Valid actions: [zoom, up, select].\n\nExample Output:\n{\"reasoning\": \"Target block visible, selecting.\", \"action\": \"select\", \"target_id\": \"1\"}[TURN_DONE]",
       "user_prompt_template": "Objective: {{intent}}\nCurrent Symbol Focus: '{{current_symbol}}'.\n{{error_context}}\n\nAST View:\n{{ast_view}}",
       "params": {
         "max_tokens": 4096
       }
     },
     "MAPS_THINK": {
-      "system_prompt": "You are a Code Diagnostician. Output ONLY a JSON object. Do not reason.\n\nExample Output:\n{\"reasoning\": \"Adding missing attribute.\", \"action\": \"fix\", \"draft_code\": \"#[func]\\nfn new_cmd() {}\"}[TURN_DONE]",
+      "system_prompt": "Task: Draft repair. Output ONLY a JSON object. Do not reason. Rule: ONLY draft the specific node or new code needed. DO NOT include surrounding blocks, impl headers, or duplicate signatures.\n\nExample Output:\n{\"reasoning\": \"Adding missing attribute.\", \"action\": \"fix\", \"draft_code\": \"#[func]\\nfn new_cmd() {}\"}[TURN_DONE]",
       "user_prompt_template": "Objective: {{intent}}\nCurrent Symbol Focus: '{{current_symbol}}'.\n{{error_context}}\nTarget Node Snippet:\n{{node_snippet}}",
       "params": {
         "max_tokens": 4096
       }
     },
     "MAPS_SURGEON": {
-      "system_prompt": "You are a Surgical Scalpel. Output ONLY a JSON object. Do not reason.\n\nExample Output:\n{\"reasoning\": \"Inserting after anchor.\", \"action\": \"insert_after\", \"code\": \"fn added() {}\"}[TURN_DONE]",
+      "system_prompt": "Task: Create surgical command. Output ONLY a JSON object. Do not reason. Actions: replace, insert_before, insert_after, delete.\n\nExample Output:\n{\"reasoning\": \"Inserting after anchor.\", \"action\": \"insert_after\", \"code\": \"fn added() {}\"}[TURN_DONE]",
       "user_prompt_template": "Draft Fix:\n{{draft_code}}\n\nTarget Node ID: {{target_id}}",
       "params": {
         "max_tokens": 4096
       }
     },
     "ROUTER": {
-      "system_prompt": "You are the Engine Orchestrator. Output ONLY a JSON object. Do not reason.\n\nNext state MUST be exactly one of: [SEARCH, DISPATCH, MAPS_NAV, THINKING, ABORT].\n\nExample Output:\n{\"reasoning\": \"Tests failed, re-thinking.\", \"next_state\": \"THINKING\"}[TURN_DONE]",
+      "system_prompt": "Task: Decide next state. Output ONLY a JSON object. Do not reason. Next state MUST be exactly one of: [SEARCH, DISPATCH, MAPS_NAV, THINKING, ABORT]. Rule: To fix a file, use SEARCH.\n\nExample Output:\n{\"reasoning\": \"Tests failed, re-thinking.\", \"next_state\": \"THINKING\"}[TURN_DONE]",
       "user_prompt_template": "Intent: {{intent}}\nRetry Count: {{retry_count}}\nTest Output: {{test_stdout}}\nActive Plan: {{plan}}",
       "params": {
         "max_tokens": 4096
