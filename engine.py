@@ -389,10 +389,18 @@ def main():
                     "app": app
                 }
             
-            # Update all states with app for UI messages
+            # Update all states with app for UI messages and abort support
             for state_obj in states_registry.values():
                 if hasattr(state_obj, "prompt_user"):
                     state_obj.prompt_user.app = app
+                
+                # NEW: Inject app into QueryLLM for streaming/abort support
+                # Traverse the state object to find if it uses QueryLLM
+                # This is a bit of a hack but avoids changing every state constructor
+                for attr_name in dir(state_obj):
+                    attr = getattr(state_obj, attr_name)
+                    if hasattr(attr, "name") and getattr(attr, "name") == "QUERY_LLM":
+                        attr.app = app
 
             # Provide context to app for /stop slash command
             app.current_context = context

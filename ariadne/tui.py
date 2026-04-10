@@ -84,6 +84,7 @@ class AriadneApp:
         self.engine_running = False
         self.current_prompt_event: Optional[threading.Event] = None
         self.current_prompt_container: Optional[Dict[str, bool]] = None
+        self.abort_event = threading.Event()
         
         # State tracking for display
         self.current_state = "IDLE"
@@ -97,6 +98,13 @@ class AriadneApp:
             'prompt': '#7aa2f7 bold',
             'arrow': '#bb9af7',
         })
+
+    def call_from_thread(self, func: Callable, *args, **kwargs):
+        """
+        Compatibility method for Textual. Since Rich is thread-safe, 
+        we can often call directly, but we wrap it for consistency.
+        """
+        func(*args, **kwargs)
 
     def post_message(self, message: Any) -> None:
         """
@@ -196,9 +204,11 @@ class AriadneApp:
             self.targets = []
             self.print_system_msg("Target list cleared.")
         elif cmd == "/stop":
-            if self.engine_running and hasattr(self, "current_context"):
-                self.current_context.stop_requested = True
-                self.print_system_msg("Stop request sent to engine...")
+            if self.engine_running:
+                if hasattr(self, "current_context"):
+                    self.current_context.stop_requested = True
+                self.abort_event.set()
+                self.print_system_msg("Stop request sent to engine and LLM...")
             else:
                 self.print_system_msg("No engine is currently running.")
         elif cmd == "/test":
@@ -287,6 +297,28 @@ class AriadneApp:
     # Compatibility methods for engine.py
     def update_intent(self, intent: str) -> None:
         self.active_intent = intent
+
+    def update_plan(self, data: Dict[str, Any]) -> None:
+        text = f"**ARCHITECT REASONING**\n{data.get('reasoning', '')}\n\n**SENSING STEPS**\n"
+        for i, s in enumerate(data.get("steps", [])):
+            text += f"{i+1}. {s.get('symbol', 'unknown')}\n"
+        self.print_ariadne_msg(text, role="Architect")
+
+    def update_surgeon(self, symbol: str, code: str, edits: List[Dict[str, Any]] = None) -> None:
+        text = f"**SURGEON: OPERATING ON {symbol}**\n\n**Target Code:**\n```\n{code}\n```\n"
+        if edits:
+            text += "\n**Queued Edits:**\n"
+            for i, e in enumerate(edits):
+                # Handle both legacy and new edit formats
+                new_code = e.get("new_code", e.get("replace_text", ""))
+                text += f"{i+1}. [italic]Replacement applied ({len(new_code)} bytes)[/]\n"
+        self.print_ariadne_msg(text, role="Surgeon")
+
+    def update_history(self, history: List[str]) -> None:
+        text = "**REPAIR HISTORY**\n"
+        for i, entry in enumerate(history):
+            text += f"{i+1}. {entry}\n"
+        self.print_ariadne_msg(text, role="History")
 
     def update_files(self, files: List[str]) -> None:
         self.targets.extend(files)

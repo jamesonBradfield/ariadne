@@ -206,6 +206,7 @@ class QueryLLM(State):
     def __init__(self, model: Optional[str] = None, api_base: Optional[str] = None):
         import os
         super().__init__("QUERY_LLM")
+        self.app = None # Set by engine if TUI is enabled
 
         # 1. Prioritize passed args, then Env, then local defaults
         self.api_base = (
@@ -227,6 +228,10 @@ class QueryLLM(State):
     def tick(self, payload: Dict[str, Any]) -> Tuple[str, Any]:
         import litellm
         import re
+        from rich.live import Live
+        from rich.markdown import Markdown
+        from rich.panel import Panel
+        from .tui import console
 
         system = payload.get("system", "")
         user = payload.get("user", "")
@@ -249,6 +254,7 @@ class QueryLLM(State):
                 "messages": messages,
                 "api_base": self.api_base,
                 "timeout": 300,
+                "stream": True # Always stream for UX polish
             }
             completion_args.update(params)
             
@@ -258,24 +264,62 @@ class QueryLLM(State):
             # Use native structured output if response_model is provided
             if response_model:
                 completion_args["response_format"] = response_model
-                # Ensure stop sequence is preserved even in structured mode
-                if "stop" in params:
-                    completion_args["stop"] = params["stop"]
+                # Structured output + streaming usually requires buffering
+            
+            content = ""
+            reasoning = ""
+            
+            # Setup Live display for streaming
+            role_label = "Ariadne"
+            if "Architect" in system: role_label = "Architect"
+            elif "Surgeon" in system: role_label = "Surgeon"
+            elif "Router" in system: role_label = "Router"
 
-            response = litellm.completion(**completion_args)
-            
-            # DEBUG: Print the raw response object
-            print(f"\n[DEBUG LLM RESPONSE OBJ]\n{response.model_dump_json(indent=2)}\n")
-            
-            message = response.choices[0].message
-            content = message.content or ""
-            
-            # Extract reasoning content (common in Qwen/DeepSeek/local reasoning models)
-            reasoning = getattr(message, "reasoning_content", None)
-            if not reasoning and hasattr(message, "provider_specific_fields"):
-                psf = message.provider_specific_fields or {}
-                reasoning = psf.get("reasoning_content")
+            with Live(console=console, auto_refresh=True) as live:
+                def update_display(current_content, current_reasoning):
+                    display_text = ""
+                    if current_reasoning:
+                        display_text += f"**THINKING**\n{current_reasoning}\n\n"
+                    if current_content:
+                        display_text += f"{current_content}"
+                    
+                    if not display_text: display_text = "..."
+                    
+                    live.update(Panel(
+                        Markdown(display_text), 
+                        title=f"[bold blue]{role_label}[/bold blue]", 
+                        border_style="blue", 
+                        expand=False
+                    ))
 
+                response_gen = litellm.completion(**completion_args)
+                
+                for chunk in response_gen:
+                    # Check for ABORT event from TUI /stop command
+                    if self.app and self.app.abort_event.is_set():
+                        logger.warning("Abort requested during LLM stream. Terminating.")
+                        self.app.abort_event.clear() # Reset for next run
+                        return "ABORT", "Interrupted by user."
+
+                    delta = chunk.choices[0].delta
+                    
+                    # Handle standard content
+                    chunk_content = getattr(delta, "content", None)
+                    if chunk_content:
+                        content += chunk_content
+                    
+                    # Handle reasoning content
+                    chunk_reasoning = getattr(delta, "reasoning_content", None)
+                    if not chunk_reasoning and hasattr(delta, "provider_specific_fields"):
+                        psf = delta.provider_specific_fields or {}
+                        chunk_reasoning = psf.get("reasoning_content")
+                    
+                    if chunk_reasoning:
+                        reasoning += chunk_reasoning
+                    
+                    update_display(content, reasoning)
+
+            # Post-stream processing
             if reasoning:
                 logger.info(f"[LLM REASONING]\n{reasoning}")
                 # Salvage logic: If main content is empty but reasoning contains the answer, 
@@ -283,7 +327,6 @@ class QueryLLM(State):
                 if not content.strip():
                     logger.warning("Main content empty. Attempting to salvage from reasoning_content...")
                     # Look for JSON first - prefer objects with common Ariadne keys
-                    # This avoids grabbing Rust code blocks that happen to use braces
                     json_patterns = [
                         r"(\{\s*\"reasoning\":.*?\})",
                         r"(\{\s*\"action\":.*?\})",
@@ -303,12 +346,10 @@ class QueryLLM(State):
                                 continue
                             
                             # NEW: Strict State/Symbol Check
-                            # If it looks like a Router response, it MUST have a valid next_state
                             if "next_state" in candidate:
                                 if not any(f'"{s}"' in candidate for s in valid_states):
                                     continue
                             
-                            # If it's a Thinking plan, it MUST have at least one step
                             if "steps" in candidate and "[]" in candidate:
                                 continue
 
@@ -323,14 +364,11 @@ class QueryLLM(State):
                         if code_match:
                             content = code_match.group(1)
                         else:
-                            # Use the last paragraph if nothing else, but filter out meta-commentary
                             paragraphs = [p.strip() for p in reasoning.split("\n\n") if p.strip()]
                             meta_markers = ["self-correction", "thinking process", "note:", "prompt asks", "analyzing", "identifying", "identifying key", "draft the intent", "refine for conciseness", "constraint:", "task:"]
                             
-                            # Try to find a paragraph that looks like a final statement (working backwards)
                             best_candidate = ""
                             for p in reversed(paragraphs):
-                                # Skip if it looks like meta-commentary or starts with a common reasoning header
                                 if any(p.lower().startswith(m) for m in meta_markers):
                                     continue
                                 best_candidate = p
@@ -338,7 +376,6 @@ class QueryLLM(State):
                             
                             if best_candidate:
                                 content = best_candidate
-                                # Strip common "header" prefixes from the candidate
                                 clean_headers = ["final output generation:", "final output:", "objective:", "summary:", "technical intent:"]
                                 for ch in clean_headers:
                                     if content.lower().startswith(ch):
@@ -348,25 +385,17 @@ class QueryLLM(State):
                                 content = paragraphs[-1]
 
             if response_model:
-                # litellm returns the parsed model object in message.content for supported providers
-                # or we can access it via response.choices[0].message.content if it's just a string
-                if hasattr(content, "model_dump"): # It's a Pydantic object
-                    logger.info(f"[LLM RESPONSE] Structured Data: {content.model_dump_json()}")
-                    return "SUCCESS", content
-                else:
-                    # It might be a JSON string that litellm didn't auto-parse (common with some providers)
-                    logger.info(f"[LLM RESPONSE] Raw Content (Expected JSON): {content}")
-                    try:
-                        import json
-                        # Clean potential chatter around JSON if salvaged
-                        json_str = content
-                        if "{" in content:
-                            json_str = content[content.find("{"):content.rfind("}")+1]
-                        parsed = response_model.model_validate_json(json_str)
-                        return "SUCCESS", parsed
-                    except Exception as e:
-                        logger.error(f"Failed to validate JSON against model: {e}")
-                        return "JSON_ERROR", content
+                logger.info(f"[LLM RESPONSE] Raw Content (Expected JSON): {content}")
+                try:
+                    import json
+                    json_str = content
+                    if "{" in content:
+                        json_str = content[content.find("{"):content.rfind("}")+1]
+                    parsed = response_model.model_validate_json(json_str)
+                    return "SUCCESS", parsed
+                except Exception as e:
+                    logger.error(f"Failed to validate JSON against model: {e}")
+                    return "JSON_ERROR", content
 
             logger.info(f"[LLM RESPONSE] Raw Content: {content}")
 
