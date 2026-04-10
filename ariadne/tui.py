@@ -19,8 +19,8 @@ from rich.live import Live
 from rich.status import Status
 from rich.table import Table
 
-# Global Console instance for thread-safe output
-console = Console()
+# Global Console instance pointing to raw stdout to avoid recursion loops
+console = Console(file=sys.__stdout__)
 
 class StateTransitionMessage:
     """Mock Textual message for engine compatibility."""
