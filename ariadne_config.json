@@ -4,8 +4,10 @@
     "api_base": "http://localhost:8080/v1",
     "api_key": "none",
     "params": {
-      "temperature": 0.0,
-      "max_tokens": 4096
+      "temperature": 0.1,
+      "max_tokens": 4096,
+      "stop": ["[TURN_DONE]"],
+      "response_format": { "type": "json_object" }
     }
   },
   "editor": {
@@ -16,59 +18,62 @@
   },
   "states": {
     "TRIAGE": {
-      "system_prompt": "You are a technical triage agent. Your task is to extract the core coding objective from the user's input. Output only the distilled technical intent as a single, concise paragraph. Avoid any conversational preamble or meta-commentary.",
+      "system_prompt": "Task: Extract the core coding objective. Output: Distilled technical intent as a single, concise paragraph. Constraint: BE EXTREMELY BRIEF. No preamble. End your response with the special termination sequence [TURN_DONE]",
       "user_prompt_template": "{{input}}",
       "params": {
-        "max_tokens": 150
+        "max_tokens": 4096
       }
     },
     "DISPATCH": {
-      "system_prompt": "You are a {{language}} test generator. Rules:\n1. ONLY pick names from the 'API Surface' provided.\n2. DO NOT invent new types or functions (e.g. if 'Entity' exists, DO NOT use 'Hero').\n3. Output ONLY #[test] functions. NO markdown. NO explanations.\n4. IF Rust, always start your response with standard imports: `use godot::prelude::*;` and `use godot::classes::*;`.",
+      "system_prompt": "Task: Generate {{language}} unit tests. Rules: 1. Use ONLY names from 'API Surface'. 2. DO NOT invent types. 3. Include standard imports. 4. Output ONLY #[test] functions. End your response with the special termination sequence [TURN_DONE]",
       "user_prompt_template": "Intent: {{intent}}\n\n{{language}} API Surface:\n{{skeleton_context}}",
+      "params": {
+        "max_tokens": 4096
+      },
       "post_process": "strip_markdown"
     },
     "THINKING": {
-      "system_prompt": "You are an Architect. Create a logical repair plan. Rules:\n1. Use ONLY names from 'Available Symbols'.\n2. If you are ADDING a new method, target an EXISTING method as the 'symbol' to serve as an anchor. NEVER target the Struct/Class itself for method additions, as it leads to syntax errors.\n3. Compare 'Test Code' and 'Skeletons' to find naming mismatches.\n4. Output RAW JSON: {\"reasoning\": \"...\", \"steps\": [{\"symbol\": \"...\"}]}",
+      "system_prompt": "Task: Create a logical repair plan. Rule: Use ONLY names from 'Available Symbols'. Rule: Output RAW JSON ONLY. NEVER use placeholders like 'string' or '...'. Example: {\"reasoning\": \"Found a mismatch in method names.\", \"steps\": [{\"symbol\": \"init\"}]}. End your response with the special termination sequence [TURN_DONE]",
       "user_prompt_template": "Intent: {{intent}}\nTest Code: {{test_code}}\nErrors: {{test_stdout}}\nAvailable: {{available_symbols}}\nSkeletons: {{skeletons}}",
       "params": {
-        "max_tokens": 2048
+        "max_tokens": 4096
       },
       "post_process": "extract_json"
     },
     "MAPS_NAV": {
-      "system_prompt": "You are a surgical navigator in an AST. Your task is to navigate the tree and lock onto the exact integer ID of the target node.\n\nRules:\n1. You must output a single JSON object at the VERY END of your response.\n2. Actions: \n   - zoom: Move deeper into the children of target_id.\n   - up: Move to the parent of the current node.\n   - select: Lock onto the target_id for the next phase (THINK). Use this when you have found the node to modify or the block/list where code should be inserted.\n3. Insertion Rule: If you want to insert a new method, and your Current Symbol Focus is an EXISTING method, simply `select` 'self' (the existing method). DO NOT try to go 'up' to find the impl block. The Surgeon will use your selected method as an anchor to insert after.\n4. If you are inserting a field into a struct, 'select' the field_declaration_list.\n5. Output Schema: {\"reasoning\": \"...\", \"action\": \"<zoom|up|select>\", \"target_id\": <string|int>}\n6. ONLY output RAW JSON.",
-      "user_prompt_template": "Objective: {{intent}}\nCurrent Symbol Focus: '{{current_symbol}}'. Only edit this symbol; other symbols are handled in separate steps.\n{{error_context}}\n\nAST View (with LSP Diagnostics):\n{{ast_view}}",
+      "system_prompt": "Task: Navigate AST. Actions: zoom, up, select. Rule: Output RAW JSON ONLY. NEVER use placeholders. Example: {\"reasoning\": \"Moving to child node.\", \"action\": \"zoom\", \"target_id\": \"5\"}. End your response with the special termination sequence [TURN_DONE]",
+      "user_prompt_template": "Objective: {{intent}}\nCurrent Symbol Focus: '{{current_symbol}}'.\n{{error_context}}\n\nAST View:\n{{ast_view}}",
       "params": {
-        "max_tokens": 1024
+        "max_tokens": 4096
       },
       "post_process": "extract_json"
     },
     "MAPS_THINK": {
-      "system_prompt": "You are a Code Diagnostician. Analyze the locked AST node and draft a surgical repair plan. Rules:\n1. If your objective is to ADD a new method and you are focused on an EXISTING method (an Anchor), your action MUST be 'fix'.\n2. In Anchor mode, your 'draft_code' should be ONLY the new code to be added. The Surgeon will handle the insertion.\n3. STRICT LANGUAGE RULE: Always output code in the SAME language as the Target Node Snippet (e.g., if the snippet is Rust, your draft_code must be Rust). NEVER hallucinate a different language.\n4. Output Schema: {\"reasoning\": \"...\", \"action\": \"<fix|abort|skip>\", \"draft_code\": \"...\"}\n5. Output RAW JSON only.",
-      "user_prompt_template": "Objective: {{intent}}\nCurrent Symbol Focus: '{{current_symbol}}'. Only edit this symbol; other symbols are handled in separate steps.\n{{error_context}}\nTarget Node Snippet:\n{{node_snippet}}\n\nLSP Hover/Type Info:\n{{hover_info}}\n\nLSP Diagnostics:\n{{diagnostics}}",
+      "system_prompt": "Task: Draft repair. Rule: Anchor Mode: If adding a method, action MUST be 'fix'. Rule: Output RAW JSON ONLY. NEVER use placeholders. Example: {\"reasoning\": \"Adding missing attribute.\", \"action\": \"fix\", \"draft_code\": \"#[func]\\nfn new_cmd() {}\"}. End your response with the special termination sequence [TURN_DONE]",
+      "user_prompt_template": "Objective: {{intent}}\nCurrent Symbol Focus: '{{current_symbol}}'.\n{{error_context}}\nTarget Node Snippet:\n{{node_snippet}}",
       "params": {
-        "max_tokens": 1024
+        "max_tokens": 4096
       },
       "post_process": "extract_json"
     },
     "MAPS_SURGEON": {
-      "system_prompt": "You are a Surgical Scalpel. Convert the plain-text draft from THINK into a strict surgical JSON command.\n\nRules:\n1. Actions: replace, insert_before, insert_after, delete.\n2. Use the EXACT code from the draft unless it contains obvious typos.\n3. NEVER delete a block just because it seems incomplete. Use replace to apply the draft code exactly, and let the syntax gate catch any real errors.\n4. Output Schema: {\"reasoning\": \"...\", \"action\": \"<replace|insert_before|insert_after|delete>\", \"code\": \"...\"}\n5. ONLY output RAW JSON.",
-      "user_prompt_template": "{{error_context}}\nDraft Fix:\n{{draft_code}}\n\nTarget Node ID: {{target_id}}",
+      "system_prompt": "Task: Create surgical command. Actions: replace, insert_before, insert_after, delete. Rule: Output RAW JSON ONLY. NEVER use placeholders. Example: {\"reasoning\": \"Inserting after anchor.\", \"action\": \"insert_after\", \"code\": \"fn added() {}\"}. End your response with the special termination sequence [TURN_DONE]",
+      "user_prompt_template": "Draft Fix:\n{{draft_code}}\n\nTarget Node ID: {{target_id}}",
       "params": {
-        "max_tokens": 1024
+        "max_tokens": 4096
       },
       "post_process": "extract_json"
     },
     "ROUTER": {
-      "system_prompt": "You are the Engine Orchestrator. Decide the next state based on the current job context, recent errors, and the active plan.\n\nSTATE DEFINITIONS:\n- SEARCH: Use this to physically EDIT SOURCE CODE based on the active plan.\n- DISPATCH: Use this ONLY to generate initial unit tests. NEVER use this to fix failing code.\n- THINKING: Use this to generate a new logical plan after analyzing test failures.\n- MAPS_NAV: Use this to begin a surgical repair on a symbol.\n- ABORT: Stop execution ONLY if stuck in an unresolvable environment error (e.g., linker/compiler missing) or infinite loop.\n\nValid next states: [SEARCH, DISPATCH, MAPS_NAV, THINKING, ABORT]\nOutput a RAW JSON object ONLY: {\"reasoning\": \"...\", \"next_state\": \"...\"}",
-      "user_prompt_template": "Intent: {{intent}}\nRetry Count: {{retry_count}}\nTest Output: {{test_stdout}}\nLLM Feedback: {{llm_feedback}}\nActive Plan: {{plan}}",
+      "system_prompt": "Task: Decide next state. Allowed: [SEARCH, DISPATCH, MAPS_NAV, THINKING, ABORT]. Rule: To fix a file, use SEARCH. Rule: Output RAW JSON ONLY. NEVER use placeholders. Example: {\"reasoning\": \"Tests failed, re-thinking.\", \"next_state\": \"THINKING\"}. End your response with the special termination sequence [TURN_DONE]",
+      "user_prompt_template": "Intent: {{intent}}\nRetry Count: {{retry_count}}\nTest Output: {{test_stdout}}\nActive Plan: {{plan}}",
       "params": {
-        "max_tokens": 512
+        "max_tokens": 4096
       },
       "post_process": "extract_json"
     },
     "POST_MORTEM": {
-      "system_prompt": "You are a Self-Optimization Analyst. Analyze the provided interaction history of a failed or difficult repair session. Identify the EXACT turn where the model made a mistake (e.g., trying to navigate up when it should have selected). Create a compact evaluation case in JSON format that can be used by textgrad to optimize the system prompt. Focus on the most critical failure. Output must follow the SelfOptimizationResponse schema.",
+      "system_prompt": "Task: Analyze interaction history. Output: Compact evaluation case in JSON. Schema: Follow SelfOptimizationResponse. End your response with the special termination sequence [TURN_DONE]",
       "user_prompt_template": "Interaction History:\n{{history}}",
       "params": {
         "max_tokens": 2048

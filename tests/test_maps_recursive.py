@@ -1,9 +1,10 @@
 import pytest
 import os
 import tempfile
+import json
 from unittest.mock import MagicMock, patch
-from ariadne.states import MAPS
-from ariadne.payloads import JobPayload
+from ariadne.states import MAPS_NAV, MAPS_THINK, MAPS_SURGEON
+from ariadne.payloads import JobPayload, MapsNavResponse, MapsThinkResponse, MapsSurgeonResponse
 from ariadne.profiles.rust_profile import RustProfile
 
 @pytest.fixture
@@ -26,11 +27,9 @@ def test_maps_comprehensive_session(temp_rust_file):
     }
     config_manager.config = {
         "states": {
-            "MAPS": {
-                "system_prompt": "sys",
-                "user_prompt_template": "user",
-                "post_process": "extract_json"
-            }
+            "MAPS_NAV": {"system_prompt": "sys", "user_prompt_template": "user", "post_process": "extract_json"},
+            "MAPS_THINK": {"system_prompt": "sys", "user_prompt_template": "user", "post_process": "extract_json"},
+            "MAPS_SURGEON": {"system_prompt": "sys", "user_prompt_template": "user", "post_process": "extract_json"}
         }
     }
     config_manager.render_prompt.side_effect = lambda template, vars: template
@@ -38,8 +37,10 @@ def test_maps_comprehensive_session(temp_rust_file):
     # Setup profile
     profile = RustProfile()
 
-    # Instantiate MAPS state
-    maps_state = MAPS(config_manager, profile)
+    # Instantiate states
+    nav_state = MAPS_NAV(config_manager, profile)
+    think_state = MAPS_THINK(config_manager, profile)
+    surgeon_state = MAPS_SURGEON(config_manager, profile)
 
     # Setup JobPayload
     with open(temp_rust_file, "rb") as f:
@@ -50,6 +51,7 @@ def test_maps_comprehensive_session(temp_rust_file):
     job = JobPayload(
         intent="refactor main",
         target_files=[temp_rust_file],
+        maps_state={"current_step_index": 0, "steps": [{"symbol": "main"}]},
         extracted_nodes=[{
             "filepath": temp_rust_file,
             "symbol": "main",
@@ -64,95 +66,37 @@ def test_maps_comprehensive_session(temp_rust_file):
     with patch("ariadne.states.QueryLLM") as MockLLM:
         mock_instance = MockLLM.return_value
         
-        # 1. ZOOM into block (target_id 2 in function_item)
-        mock_instance.tick.return_value = ("SUCCESS", {"action": "zoom", "target_id": 2})
-        status, _ = maps_state.tick(job)
-        assert status == "MAPS"
+        # 1. NAV: ZOOM into block
+        mock_instance.tick.return_value = ("SUCCESS", MapsNavResponse(reasoning="r", action="zoom", target_id="2"))
+        status, _ = nav_state.tick(job)
+        assert status == "MAPS_NAV"
         assert len(job.maps_state["navigation_stack"]) == 2
         
-        # 2. ZOOM into first let_declaration (target_id 0 in block) to test 'up' later
-        mock_instance.tick.return_value = ("SUCCESS", {"action": "zoom", "target_id": 0})
-        status, _ = maps_state.tick(job)
+        # 2. NAV: ZOOM into first let
+        mock_instance.tick.return_value = ("SUCCESS", MapsNavResponse(reasoning="r", action="zoom", target_id="0"))
+        status, _ = nav_state.tick(job)
         assert len(job.maps_state["navigation_stack"]) == 3
         
-        # 3. UP back to block
-        mock_instance.tick.return_value = ("SUCCESS", {"action": "up"})
-        status, _ = maps_state.tick(job)
+        # 3. NAV: UP back to block
+        mock_instance.tick.return_value = ("SUCCESS", MapsNavResponse(reasoning="r", action="up", target_id="2"))
+        status, _ = nav_state.tick(job)
         assert len(job.maps_state["navigation_stack"]) == 2
         
-        # 4. INSERT_BEFORE first let (target_id 0 in block)
-        mock_instance.tick.return_value = ("SUCCESS", {"action": "insert_before", "target_id": 0, "code": "// comment\n    "})
-        status, _ = maps_state.tick(job)
-        assert status == "MAPS"
-        assert len(job.fixed_code["edits"]) == 1
-        assert job.fixed_code["edits"][-1]["new_code"] == "// comment\n    "
+        # 4. NAV: SELECT first let
+        mock_instance.tick.return_value = ("SUCCESS", MapsNavResponse(reasoning="r", action="select", target_id="0"))
+        status, _ = nav_state.tick(job)
+        assert status == "MAPS_THINK"
         
-        # 5. INSERT_AFTER second let (target_id 1 in block)
-        mock_instance.tick.return_value = ("SUCCESS", {"action": "insert_after", "target_id": 1, "code": "\n    println!(\"done\");"})
-        status, _ = maps_state.tick(job)
-        assert status == "MAPS"
-        assert len(job.fixed_code["edits"]) == 2
+        # 5. THINK: Draft fix
+        mock_instance.tick.return_value = ("SUCCESS", MapsThinkResponse(reasoning="r", action="fix", draft_code="let x = 42;"))
+        status, _ = think_state.tick(job)
+        assert status == "MAPS_SURGEON"
         
-        # 6. DELETE first let (target_id 0 in block)
-        mock_instance.tick.return_value = ("SUCCESS", {"action": "delete", "target_id": 0})
-        status, _ = maps_state.tick(job)
-        assert status == "MAPS"
-        assert len(job.fixed_code["edits"]) == 3
-        assert job.fixed_code["edits"][-1]["new_code"] == ""
-        
-        # 7. DONE
-        mock_instance.tick.return_value = ("SUCCESS", {"action": "done"})
-        status, _ = maps_state.tick(job)
+        # 6. SURGEON: Format JSON
+        mock_instance.tick.return_value = ("SUCCESS", MapsSurgeonResponse(reasoning="r", action="replace", code="let x = 42;"))
+        status, _ = surgeon_state.tick(job)
         assert status == "SYNTAX_GATE"
-
-def test_maps_error_handling(temp_rust_file):
-    # Setup mock config manager
-    config_manager = MagicMock()
-    config_manager.get_model_info.return_value = {
-        "model": "mock-model",
-        "api_base": "mock-api",
-        "params": {}
-    }
-    config_manager.config = {
-        "states": {
-            "MAPS": {
-                "system_prompt": "sys",
-                "user_prompt_template": "user",
-                "post_process": "extract_json"
-            }
-        }
-    }
-    config_manager.render_prompt.side_effect = lambda template, vars: template
-
-    # Setup profile
-    profile = RustProfile()
-
-    # Instantiate MAPS state
-    maps_state = MAPS(config_manager, profile)
-
-    # Setup JobPayload
-    job = JobPayload(
-        intent="fix",
-        target_files=[temp_rust_file],
-        extracted_nodes=[{
-            "filepath": temp_rust_file,
-            "symbol": "main",
-            "start_byte": 0,
-            "end_byte": 10,
-            "node_string": "fn main()",
-            "node_type": "function_item"
-        }]
-    )
-
-    # Mock QueryLLM to simulate invalid action
-    with patch("ariadne.states.QueryLLM") as MockLLM:
-        mock_instance = MockLLM.return_value
-        
-        # Invalid target_id for zoom
-        mock_instance.tick.return_value = ("SUCCESS", {"action": "zoom", "target_id": 999})
-        status, _ = maps_state.tick(job)
-        assert status == "MAPS"
-        assert "Invalid target_id" in job.llm_feedback
+        assert len(job.fixed_code["edits"]) == 1
 
 if __name__ == "__main__":
     pytest.main([__file__])

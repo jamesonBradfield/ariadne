@@ -3,6 +3,7 @@ import logging
 import os
 import json
 import threading
+import time
 from typing import Any, Dict, List, Optional
 
 from ariadne.core import EngineContext, State
@@ -162,8 +163,34 @@ def run_engine_loop(context: EngineContext, states_registry: Dict[str, State], i
         intent = getattr(payload, "intent", payload.get("intent", "")) if payload else ""
         app.call_from_thread(app.update_intent, intent)
 
+    start_wall_time = time.time()
+    turn_count = 0
+    
+    # Defaults
+    max_turns = 20
+    global_timeout = 1800
+    
+    try:
+        import __main__
+        if hasattr(__main__, 'args'):
+            max_turns = getattr(__main__.args, 'max_turns', 20)
+            global_timeout = getattr(__main__.args, 'timeout', 1800)
+    except Exception:
+        pass
+
     while context.current_state != "FINISH":
-        logger.info(f"--- TICKING: {context.current_state} ---")
+        # Safety Checks
+        elapsed_total = time.time() - start_wall_time
+        if elapsed_total > global_timeout:
+            logger.error(f"Global timeout reached ({global_timeout}s). Aborting.")
+            context.transition("ABORT")
+            # Continue to allow one last tick to POST_MORTEM if needed
+        
+        if turn_count >= max_turns and context.current_state not in ["SUCCESS", "ABORT", "POST_MORTEM"]:
+            logger.error(f"Maximum transitions reached ({max_turns}). Aborting.")
+            context.transition("ABORT")
+
+        logger.info(f"--- TICKING: {context.current_state} (Turn {turn_count+1}, {int(elapsed_total)}s) ---")
         
         # Terminal states transition to POST_MORTEM
         if context.current_state in ["SUCCESS", "ABORT"]:
@@ -171,8 +198,9 @@ def run_engine_loop(context: EngineContext, states_registry: Dict[str, State], i
              logger.info(f"Terminal state {context.current_state} reached. Transitioning to POST_MORTEM.")
 
         if app:
-            retry_count = getattr(payload, "retry_count", 0) if hasattr(payload, "retry_count") else 0
-            app.post_message(StateTransitionMessage(context.current_state, retry_count))
+            # retry_count = getattr(payload, "retry_count", 0) if hasattr(payload, "retry_count") else 0
+            # Use global turn count for TUI indicator
+            app.post_message(StateTransitionMessage(context.current_state, turn_count + 1))
             
             # Update Plan tab if plan changed
             if hasattr(payload, "plan") and payload.plan:
@@ -190,21 +218,12 @@ def run_engine_loop(context: EngineContext, states_registry: Dict[str, State], i
                         edits = payload.fixed_code.get("edits", [])
                     app.call_from_thread(app.update_surgeon, node["symbol"], node["node_string"], edits)
 
-            # Update History tab
-            if hasattr(payload, "plan_history") and payload.plan_history:
-                app.call_from_thread(app.update_history, payload.plan_history)
-
-            # Update Test Output tab if failure occurred
-            if hasattr(payload, "test_stdout") and payload.test_stdout:
-                 app.call_from_thread(app.write_test_output, payload.test_stdout)
-
         active_state = states_registry.get(context.current_state)
         
         if not active_state:
             logger.error(f"State {context.current_state} not found!")
             break
 
-        import time
         start_time = time.time()
         
         current_state_name, payload = active_state.tick(payload)
@@ -213,6 +232,7 @@ def run_engine_loop(context: EngineContext, states_registry: Dict[str, State], i
         logger.info(f"[BENCHMARK] {context.current_state} took {elapsed:.2f}s")
         
         context.transition(current_state_name)
+        turn_count += 1
 
         if current_state_name == "FINISH":
              break
@@ -234,6 +254,8 @@ def main():
     parser.add_argument("--tui", action="store_true", help="Enable the Textual Dashboard TUI")
     parser.add_argument("--headless", action="store_true", help="Run without interactive editor interventions")
     parser.add_argument("--project-dir", "-C", default=".", help="Set the project working directory")
+    parser.add_argument("--max-turns", type=int, default=20, help="Maximum transitions before aborting")
+    parser.add_argument("--timeout", type=int, default=1800, help="Global timeout in seconds")
     args = parser.parse_args()
 
     setup_logging(args.log_level, args.tui)

@@ -89,18 +89,19 @@ This session overhauled the `MAPS` state into a deterministic surgical pipeline 
 
 **Next Steps**: Refine the Architect's (`THINKING`) ability to distinguish between `struct` and `impl` blocks in Rust to avoid structural navigation deadlocks.
 
-### **Pydantic Migration & Live Prompt Optimization**
-This session modernized Ariadne's data layer and implemented a real-time self-optimization loop using `textgrad`.
+### **Pydantic Migration & Local LLM Hardening**
+This session modernized Ariadne's data layer and implemented extreme safeguards for small local models (like Qwen3.5-9B).
 
 1.  **Strict Data Layer (Pydantic)**:
     *   Migrated `JobPayload` to a strict Pydantic `BaseModel`, eliminating "Payload Identity Crisis" and enabling dot-notation across all states.
-    *   Implemented native **Structured Outputs** via `litellm`, removing ~100 lines of manual JSON extraction and bracket-counting logic.
-2.  **Live Optimization Loop (`textgrad`)**:
-    *   Integrated `textgrad` directly into the execution flow. Critical states (`MAPS_NAV`, `MAPS_THINK`, `MAPS_SURGEON`) are now audited by a high-tier "Judge" model (via OpenRouter).
-    *   **Self-Healing Prompts**: If the Judge detects a logical error (e.g., trying to navigate `up` from the root), Ariadne generates a "Textual Gradient," immediately updates `ariadne_config.json`, and retries the turn.
-3.  **Automatic Eval Generation**:
-    *   The `POST_MORTEM` state now automatically captures failing interactions and appends them to `tests/llm_cases.json`. Ariadne now writes her own regression tests based on her mistakes.
+    *   Implemented native **Structured Outputs** via `litellm`, removing ~100 lines of manual JSON extraction logic.
+2.  **Local LLM Harnessing (The "Stop Sequence" Trap)**:
+    *   Hardened the engine against local model verbosity by implementing physical **Stop Sequences** (`[TURN_DONE]`) and a "Brevity Mandate" in system prompts.
+    *   Developed a **Salvage Logic** in `QueryLLM` that can surgically extract valid JSON payloads from truncated or rambling model reasoning.
+3.  **Autonomous Surgery (Zero-Intervention Mode)**:
+    *   Implemented a truly silent headless mode via `ARIADNE_AUTO_ACCEPT=true`, allowing for 100% automated code repairs without manual terminal prompts.
+    *   Added **Turn Limits** and **Wall-Clock Timeouts** to the engine loop to prevent infinite reasoning cycles.
 4.  **AST Pattern Matching (`ast-grep`)**:
-    *   Integrated `ast-grep-py` to replace legacy Tree-sitter query strings with intuitive, pattern-based symbol identification (`fn $NAME(...) { $$$ }`).
+    *   Integrated `ast-grep-py` to replace legacy Tree-sitter query strings with intuitive, pattern-based symbol identification (`fn $NAME(...) { $$$ }`) across all profiles.
 
-**Next Steps**: Battle-test the Live Optimization loop on complex Godot-Rust refactors and verify the `ast-grep` migration for Python.
+**Next Steps**: Refine the Architect's (`THINKING`) ability to distinguish between `struct` and `impl` blocks in Rust to avoid structural navigation deadlocks and verify the `ast-grep` migration for additional languages.

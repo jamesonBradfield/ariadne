@@ -237,14 +237,10 @@ class QueryLLM(State):
         logger.info(f"[LLM REQUEST] System Prompt: {system}")
         logger.info(f"[LLM REQUEST] User Prompt: {user}")
 
-        # Robustness: Combine system and user for local servers if needed
-        if "localhost" in self.api_base:
-            messages = [{"role": "user", "content": f"SYSTEM: {system}\n\nUSER: {user}"}]
-        else:
-            messages = [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ]
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ]
 
         try:
             # Prepare arguments
@@ -262,13 +258,98 @@ class QueryLLM(State):
             # Use native structured output if response_model is provided
             if response_model:
                 completion_args["response_format"] = response_model
+                # Ensure stop sequence is preserved even in structured mode
+                if "stop" in params:
+                    completion_args["stop"] = params["stop"]
 
             response = litellm.completion(**completion_args)
             
+            # DEBUG: Print the raw response object
+            print(f"\n[DEBUG LLM RESPONSE OBJ]\n{response.model_dump_json(indent=2)}\n")
+            
+            message = response.choices[0].message
+            content = message.content or ""
+            
+            # Extract reasoning content (common in Qwen/DeepSeek/local reasoning models)
+            reasoning = getattr(message, "reasoning_content", None)
+            if not reasoning and hasattr(message, "provider_specific_fields"):
+                psf = message.provider_specific_fields or {}
+                reasoning = psf.get("reasoning_content")
+
+            if reasoning:
+                logger.info(f"[LLM REASONING]\n{reasoning}")
+                # Salvage logic: If main content is empty but reasoning contains the answer, 
+                # try to extract it (especially if we hit token limits)
+                if not content.strip():
+                    logger.warning("Main content empty. Attempting to salvage from reasoning_content...")
+                    # Look for JSON first - prefer objects with common Ariadne keys
+                    # This avoids grabbing Rust code blocks that happen to use braces
+                    json_patterns = [
+                        r"(\{\s*\"reasoning\":.*?\})",
+                        r"(\{\s*\"action\":.*?\})",
+                        r"(\{\s*\"steps\":.*?\})",
+                        r"(\{.*\})" # Fallback
+                    ]
+                    
+                    found_json = False
+                    valid_states = ["SEARCH", "DISPATCH", "MAPS_NAV", "THINKING", "ABORT", "ROUTER", "SUCCESS", "SENSE", "MAPS_THINK", "MAPS_SURGEON", "SYNTAX_GATE", "ACTUATE", "INTERVENE"]
+                    
+                    for pattern in json_patterns:
+                        matches = re.finditer(pattern, reasoning, re.DOTALL)
+                        for match in matches:
+                            candidate = match.group(1)
+                            # Skip templates/placeholders
+                            if '\"...\"' in candidate or '<string>' in candidate or '<next_state>' in candidate:
+                                continue
+                            
+                            # NEW: Strict State/Symbol Check
+                            # If it looks like a Router response, it MUST have a valid next_state
+                            if "next_state" in candidate:
+                                if not any(f'"{s}"' in candidate for s in valid_states):
+                                    continue
+                            
+                            # If it's a Thinking plan, it MUST have at least one step
+                            if "steps" in candidate and "[]" in candidate:
+                                continue
+
+                            content = candidate
+                            found_json = True
+                            break
+                        if found_json: break
+                    
+                    if not found_json:
+                        # Look for markdown code blocks
+                        code_match = re.search(r"```(?:\w+)?\n(.*?)\n```", reasoning, re.DOTALL)
+                        if code_match:
+                            content = code_match.group(1)
+                        else:
+                            # Use the last paragraph if nothing else, but filter out meta-commentary
+                            paragraphs = [p.strip() for p in reasoning.split("\n\n") if p.strip()]
+                            meta_markers = ["self-correction", "thinking process", "note:", "prompt asks", "analyzing", "identifying", "identifying key", "draft the intent", "refine for conciseness", "constraint:", "task:"]
+                            
+                            # Try to find a paragraph that looks like a final statement (working backwards)
+                            best_candidate = ""
+                            for p in reversed(paragraphs):
+                                # Skip if it looks like meta-commentary or starts with a common reasoning header
+                                if any(p.lower().startswith(m) for m in meta_markers):
+                                    continue
+                                best_candidate = p
+                                break
+                            
+                            if best_candidate:
+                                content = best_candidate
+                                # Strip common "header" prefixes from the candidate
+                                clean_headers = ["final output generation:", "final output:", "objective:", "summary:", "technical intent:"]
+                                for ch in clean_headers:
+                                    if content.lower().startswith(ch):
+                                        content = content[len(ch):].strip()
+                                        break
+                            elif paragraphs:
+                                content = paragraphs[-1]
+
             if response_model:
                 # litellm returns the parsed model object in message.content for supported providers
                 # or we can access it via response.choices[0].message.content if it's just a string
-                content = response.choices[0].message.content
                 if hasattr(content, "model_dump"): # It's a Pydantic object
                     logger.info(f"[LLM RESPONSE] Structured Data: {content.model_dump_json()}")
                     return "SUCCESS", content
@@ -277,13 +358,16 @@ class QueryLLM(State):
                     logger.info(f"[LLM RESPONSE] Raw Content (Expected JSON): {content}")
                     try:
                         import json
-                        parsed = response_model.model_validate_json(content)
+                        # Clean potential chatter around JSON if salvaged
+                        json_str = content
+                        if "{" in content:
+                            json_str = content[content.find("{"):content.rfind("}")+1]
+                        parsed = response_model.model_validate_json(json_str)
                         return "SUCCESS", parsed
                     except Exception as e:
                         logger.error(f"Failed to validate JSON against model: {e}")
                         return "JSON_ERROR", content
 
-            content = response.choices[0].message.content
             logger.info(f"[LLM RESPONSE] Raw Content: {content}")
 
             # Legacy Post-Processing Logic (Strip Markdown etc.)

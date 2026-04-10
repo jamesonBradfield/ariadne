@@ -1,5 +1,5 @@
 import tree_sitter_python as tspython
-from typing import Any, List
+from typing import Any, List, Tuple
 from .base import BaseProfile
 
 class PythonProfile(BaseProfile):

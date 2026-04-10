@@ -2,8 +2,8 @@ import pytest
 import os
 import tempfile
 from unittest.mock import MagicMock, patch
-from ariadne.states import SENSE, MAPS, SYNTAX_GATE, ACTUATE
-from ariadne.payloads import JobPayload
+from ariadne.states import SENSE, MAPS_NAV, MAPS_THINK, MAPS_SURGEON, SYNTAX_GATE, ACTUATE
+from ariadne.payloads import JobPayload, MapsNavResponse, MapsThinkResponse, MapsSurgeonResponse
 from ariadne.profiles.rust_profile import RustProfile
 from ariadne.profiles.python_profile import PythonProfile
 
@@ -31,12 +31,20 @@ def test_rust_end_to_end_repair(temp_rust_file):
     # Setup
     config_manager = MagicMock()
     config_manager.get_model_info.return_value = {"model": "m", "api_base": "a", "params": {}}
-    config_manager.config = {"states": {"MAPS": {"system_prompt": "s", "user_prompt_template": "u", "post_process": "extract_json"}}}
+    config_manager.config = {
+        "states": {
+            "MAPS_NAV": {"system_prompt": "s", "user_prompt_template": "u", "post_process": "extract_json"},
+            "MAPS_THINK": {"system_prompt": "s", "user_prompt_template": "u", "post_process": "extract_json"},
+            "MAPS_SURGEON": {"system_prompt": "s", "user_prompt_template": "u", "post_process": "extract_json"}
+        }
+    }
     config_manager.render_prompt.side_effect = lambda t, v: t
     
     profile = RustProfile()
     sense_state = SENSE(profile)
-    maps_state = MAPS(config_manager, profile)
+    nav_state = MAPS_NAV(config_manager, profile)
+    think_state = MAPS_THINK(config_manager, profile)
+    surgeon_state = MAPS_SURGEON(config_manager, profile)
     syntax_gate = SYNTAX_GATE(profile)
     actuate = ACTUATE()
 
@@ -52,32 +60,36 @@ def test_rust_end_to_end_repair(temp_rust_file):
         
         # 1. SENSE
         status, job = sense_state.tick(job)
-        assert status == "MAPS"
+        assert status == "MAPS_NAV"
         assert len(job.extracted_nodes) == 1
         
-        # 2. MAPS (Zoom into block)
-        # named_children: identifier (0), parameters (1), block (2)
-        mock_instance.tick.return_value = ("SUCCESS", {"action": "zoom", "target_id": 2})
-        status, job = maps_state.tick(job)
-        assert status == "MAPS"
+        # 2. MAPS_NAV (Zoom into block)
+        # block ID is likely "2" or similar
+        mock_instance.tick.return_value = ("SUCCESS", MapsNavResponse(reasoning="r", action="zoom", target_id="2"))
+        status, job = nav_state.tick(job)
+        assert status == "MAPS_NAV"
         
-        # 3. MAPS (Replace let x = 1 with let x = 42)
-        # block named_children: let_declaration (0)
-        mock_instance.tick.return_value = ("SUCCESS", {"action": "replace", "target_id": 0, "code": "let x = 42;"})
-        status, job = maps_state.tick(job)
-        assert status == "MAPS"
+        # 3. MAPS_NAV (Select let_declaration)
+        mock_instance.tick.return_value = ("SUCCESS", MapsNavResponse(reasoning="r", action="select", target_id="0"))
+        status, job = nav_state.tick(job)
+        assert status == "MAPS_THINK"
+        
+        # 4. MAPS_THINK (Draft fix)
+        mock_instance.tick.return_value = ("SUCCESS", MapsThinkResponse(reasoning="r", action="fix", draft_code="let x = 42;"))
+        status, job = think_state.tick(job)
+        assert status == "MAPS_SURGEON"
+        
+        # 5. MAPS_SURGEON (Format JSON)
+        mock_instance.tick.return_value = ("SUCCESS", MapsSurgeonResponse(reasoning="r", action="replace", code="let x = 42;"))
+        status, job = surgeon_state.tick(job)
+        assert status == "SYNTAX_GATE"
         assert len(job.fixed_code["edits"]) == 1
         
-        # 4. MAPS (Done)
-        mock_instance.tick.return_value = ("SUCCESS", {"action": "done"})
-        status, job = maps_state.tick(job)
-        assert status == "SYNTAX_GATE"
-        
-        # 5. SYNTAX_GATE
+        # 6. SYNTAX_GATE
         status, job = syntax_gate.tick(job)
         assert status == "ACTUATE"
         
-        # 6. ACTUATE
+        # 7. ACTUATE
         status, job = actuate.tick(job)
         assert status == "SENSE"
         assert job.maps_state["current_step_index"] == 1
@@ -93,12 +105,20 @@ def test_python_end_to_end_repair(temp_python_file):
     # Setup
     config_manager = MagicMock()
     config_manager.get_model_info.return_value = {"model": "m", "api_base": "a", "params": {}}
-    config_manager.config = {"states": {"MAPS": {"system_prompt": "s", "user_prompt_template": "u", "post_process": "extract_json"}}}
+    config_manager.config = {
+        "states": {
+            "MAPS_NAV": {"system_prompt": "s", "user_prompt_template": "u", "post_process": "extract_json"},
+            "MAPS_THINK": {"system_prompt": "s", "user_prompt_template": "u", "post_process": "extract_json"},
+            "MAPS_SURGEON": {"system_prompt": "s", "user_prompt_template": "u", "post_process": "extract_json"}
+        }
+    }
     config_manager.render_prompt.side_effect = lambda t, v: t
     
     profile = PythonProfile()
     sense_state = SENSE(profile)
-    maps_state = MAPS(config_manager, profile)
+    nav_state = MAPS_NAV(config_manager, profile)
+    think_state = MAPS_THINK(config_manager, profile)
+    surgeon_state = MAPS_SURGEON(config_manager, profile)
     syntax_gate = SYNTAX_GATE(profile)
     actuate = ACTUATE()
 
@@ -114,30 +134,33 @@ def test_python_end_to_end_repair(temp_python_file):
         
         # 1. SENSE
         status, job = sense_state.tick(job)
-        assert status == "MAPS"
+        assert status == "MAPS_NAV"
         
-        # 2. MAPS (Zoom into body block)
-        # named_children: identifier (0), parameters (1), block (2)
-        mock_instance.tick.return_value = ("SUCCESS", {"action": "zoom", "target_id": 2})
-        status, job = maps_state.tick(job)
-        assert status == "MAPS"
+        # 2. MAPS_NAV (Zoom into body)
+        mock_instance.tick.return_value = ("SUCCESS", MapsNavResponse(reasoning="r", action="zoom", target_id="2"))
+        status, job = nav_state.tick(job)
+        assert status == "MAPS_NAV"
         
-        # 3. MAPS (Replace return a + b with return a * b)
-        # block named_children: return_statement (0)
-        mock_instance.tick.return_value = ("SUCCESS", {"action": "replace", "target_id": 0, "code": "    return a * b"})
-        status, job = maps_state.tick(job)
-        assert status == "MAPS"
+        # 3. MAPS_NAV (Select return_statement)
+        mock_instance.tick.return_value = ("SUCCESS", MapsNavResponse(reasoning="r", action="select", target_id="0"))
+        status, job = nav_state.tick(job)
+        assert status == "MAPS_THINK"
         
-        # 4. MAPS (Done)
-        mock_instance.tick.return_value = ("SUCCESS", {"action": "done"})
-        status, job = maps_state.tick(job)
+        # 4. MAPS_THINK (Draft fix)
+        mock_instance.tick.return_value = ("SUCCESS", MapsThinkResponse(reasoning="r", action="fix", draft_code="    return a * b"))
+        status, job = think_state.tick(job)
+        assert status == "MAPS_SURGEON"
+        
+        # 5. MAPS_SURGEON (Format JSON)
+        mock_instance.tick.return_value = ("SUCCESS", MapsSurgeonResponse(reasoning="r", action="replace", code="    return a * b"))
+        status, job = surgeon_state.tick(job)
         assert status == "SYNTAX_GATE"
         
-        # 5. SYNTAX_GATE
+        # 6. SYNTAX_GATE
         status, job = syntax_gate.tick(job)
         assert status == "ACTUATE"
         
-        # 6. ACTUATE
+        # 7. ACTUATE
         status, job = actuate.tick(job)
         assert status == "SENSE"
 
