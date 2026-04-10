@@ -104,4 +104,8 @@ This session modernized Ariadne's data layer and implemented extreme safeguards 
 4.  **AST Pattern Matching (`ast-grep`)**:
     *   Integrated `ast-grep-py` to replace legacy Tree-sitter query strings with intuitive, pattern-based symbol identification (`fn $NAME(...) { $$$ }`) across all profiles.
 
-**Next Steps**: Refine the Architect's (`THINKING`) ability to distinguish between `struct` and `impl` blocks in Rust to avoid structural navigation deadlocks and verify the `ast-grep` migration for additional languages.
+**Next Steps**: 
+*   **Architectural Hardening**: Refine the Architect's (`THINKING`) ability to distinguish between `struct` and `impl` blocks in Rust to avoid structural navigation deadlocks.
+*   **Multi-File Loops (Aspirational)**: Implement a mechanism for multi-file/multi-line edits within a single loop without sacrificing **MAPS surgical precision**. This involves either expanding the `SEARCH` state to handle broader discovery or allowing the LLM to transition back to a "Discovery" state to acquire new file contexts while maintaining the existing AST-guided pipeline.
+*   **Cross-Language Validation**: Verify the `ast-grep` migration and autonomous execution across Python and additional language profiles.
+
