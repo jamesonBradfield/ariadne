@@ -234,6 +234,10 @@ def run_engine_loop(context: EngineContext, states_registry: Dict[str, State], i
         context.transition(current_state_name)
         turn_count += 1
 
+        if context.stop_requested:
+            logger.warning("Stop requested by user. Transitioning to ABORT.")
+            context.transition("ABORT")
+
         if current_state_name == "FINISH":
              break
              
@@ -389,9 +393,9 @@ def main():
             for state_obj in states_registry.values():
                 if hasattr(state_obj, "prompt_user"):
                     state_obj.prompt_user.app = app
-                if hasattr(state_obj, "config_manager"):
-                    # Add app to config_manager if needed? No, usually states handle it.
-                    pass
+
+            # Provide context to app for /stop slash command
+            app.current_context = context
 
             engine_thread = threading.Thread(
                 target=run_engine_loop,

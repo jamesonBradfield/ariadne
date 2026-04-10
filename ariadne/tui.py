@@ -189,14 +189,31 @@ class AriadneApp:
         elif cmd == "/add":
             self.targets.extend(args)
             self.print_system_msg(f"Added targets: [cyan]{', '.join(args)}[/]")
+        elif cmd == "/drop":
+            self.targets = [t for t in self.targets if t not in args]
+            self.print_system_msg(f"Dropped targets: [red]{', '.join(args)}[/]")
+        elif cmd == "/clear":
+            self.targets = []
+            self.print_system_msg("Target list cleared.")
+        elif cmd == "/stop":
+            if self.engine_running and hasattr(self, "current_context"):
+                self.current_context.stop_requested = True
+                self.print_system_msg("Stop request sent to engine...")
+            else:
+                self.print_system_msg("No engine is currently running.")
+        elif cmd == "/test":
+            self.print_system_msg("Manual test execution not yet implemented via command.")
         elif cmd == "/ls":
             self.print_system_msg(f"Current targets: [cyan]{', '.join(self.targets) if self.targets else 'None'}[/]")
             self.print_system_msg(f"Active goal: [white]{self.active_intent}[/]")
         elif cmd == "/help":
             help_text = (
-                "[bold cyan]/add <files>[/] - Add files to the surgical session\n"
-                "[bold cyan]/ls[/]          - List current targets and active goal\n"
-                "[bold cyan]/exit[/]        - Exit Ariadne\n"
+                "[bold cyan]/add <files>[/]  - Add files to the surgical session\n"
+                "[bold cyan]/drop <files>[/] - Remove files from the session\n"
+                "[bold cyan]/clear[/]        - Clear all targets\n"
+                "[bold cyan]/ls[/]           - List current targets and active goal\n"
+                "[bold cyan]/stop[/]         - Abort the current engine run\n"
+                "[bold cyan]/exit[/]         - Exit Ariadne\n"
                 "Or simply type your coding objective to start the engine."
             )
             self.print_system_msg(help_text)

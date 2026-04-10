@@ -28,6 +28,7 @@ class EngineContext:
     def __init__(self, initial_state: str):
         self.current_state = initial_state
         self.history = []
+        self.stop_requested = False
 
     def transition(self, next_state: str):
         """Log the transition and update current state."""
