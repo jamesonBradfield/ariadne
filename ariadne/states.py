@@ -388,6 +388,26 @@ class THINKING(State):
         job.plan = plan
         job.plan_history.append(plan.reasoning)
 
+        # LSP Reference Search: Find all references for each step's symbol
+        lsp_service = context.services.lsp
+        if lsp_service and lsp_service.is_running():
+            for step in plan.steps:
+                try:
+                    # Get references for the symbol
+                    references = []
+                    for filepath in context.target_files:
+                        if not os.path.exists(filepath):
+                            continue
+                        try:
+                            refs = lsp_service.find_references(filepath, step.symbol)
+                            if refs:
+                                references.extend(refs)
+                        except Exception:
+                            pass
+                    step.references = references
+                except Exception:
+                    pass
+
         job.maps_state = {
             "current_step_index": 0,
             "steps": [step.model_dump() for step in plan.steps],

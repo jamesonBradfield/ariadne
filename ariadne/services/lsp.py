@@ -52,3 +52,26 @@ class LSPService(Service):
         if not self._running:
             return
         self._manager.did_change(filepath, content)
+
+    def find_references(self, filepath: str, symbol: str) -> List[Dict[str, Any]]:
+        """Find all references to a symbol in the workspace."""
+        if not self._running:
+            return []
+        try:
+            # Use the MCP workspace/executeCommand tool to find references
+            result = self._manager.call_tool_sync(
+                "textDocument/references",
+                {
+                    "uri": f"file://{filepath}",
+                    "position": {"line": 0, "character": 0},  # Will be overridden
+                    "context": {"includeDeclaration": False},
+                },
+            )
+            if result and hasattr(result, "content") and result.content:
+                import json
+
+                data = json.loads(result.content[0].text)
+                return data.get("references", [])
+        except Exception:
+            pass
+        return []

@@ -10,6 +10,7 @@ class DispatchResponse(BaseModel):
 
 class ThinkingStep(BaseModel):
     symbol: str
+    references: Optional[List[Dict[str, Any]]] = None  # LSP reference locations
 
 
 class ThinkingResponse(BaseModel):
