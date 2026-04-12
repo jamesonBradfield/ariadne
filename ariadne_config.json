@@ -17,13 +17,6 @@
     "headless": true
   },
   "states": {
-    "TRIAGE": {
-      "system_prompt": "You are a technical triage agent. Extract the coding objective into a single concise paragraph. Do not explain your process.\n\nExample Output:\nImplement a new method `calculate_area` in the `Shape` struct that returns a f64. Use the #[func] attribute.[TURN_DONE]",
-      "user_prompt_template": "{{input}}",
-      "params": {
-        "max_tokens": 4096
-      }
-    },
     "DISPATCH": {
       "system_prompt": "You are a {{language}} test generator. Output ONLY a JSON object with the key 'test_code'. Use ONLY names from the API Surface. Do not reason.\n\nExample Output:\n{\"test_code\": \"#[test]\\nfn test_it() { ... }\"}[TURN_DONE]",
       "user_prompt_template": "Intent: {{intent}}\n\n{{language}} API Surface:\n{{skeleton_context}}",
@@ -59,9 +52,16 @@
         "max_tokens": 4096
       }
     },
-    "ROUTER": {
-      "system_prompt": "Task: Decide next state. Output ONLY a JSON object. Do not reason. Next state MUST be exactly one of: [SEARCH, DISPATCH, MAPS_NAV, THINKING, ABORT]. Rule: To fix a file, use SEARCH.\n\nExample Output:\n{\"reasoning\": \"Tests failed, re-thinking.\", \"next_state\": \"THINKING\"}[TURN_DONE]",
-      "user_prompt_template": "Intent: {{intent}}\nRetry Count: {{retry_count}}\nTest Output: {{test_stdout}}\nActive Plan: {{plan}}",
+    "FILE_EXPLORER": {
+      "system_prompt": "You are a file explorer. Navigate the project to find relevant code for investigation or repair. Output ONLY a JSON object. Do not reason.\n\nActions:\n- ls: List current directory\n- cd: Change directory (use '..' to go up)\n- preview: Show AST skeleton of a file\n- spawn: Use this once you have identified one or more points (files or symbols) to investigate/fix.\n\nExample Output:\n{\"reasoning\": \"Looking for health-related logic.\", \"action\": \"cd\", \"target\": \"src/entities\"}[TURN_DONE]",
+      "user_prompt_template": "Objective: {{intent}}\n\n{{explorer_view}}\n\n{{llm_feedback}}",
+      "params": {
+        "max_tokens": 4096
+      }
+    },
+    "SPAWN": {
+      "system_prompt": "You are a task dispatcher. Convert the identified investigation points into a plan. Output ONLY a JSON object. Do not reason.\n\nExample Output:\n{\"reasoning\": \"Investigation found two relevant files.\", \"targets\": [\"health.rs:take_damage\", \"player.rs:update\"]}[TURN_DONE]",
+      "user_prompt_template": "Objective: {{intent}}",
       "params": {
         "max_tokens": 4096
       }

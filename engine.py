@@ -4,23 +4,33 @@ import os
 import json
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from ariadne.core import EngineContext, State
 from ariadne.payloads import JobPayload
 from ariadne.states import (
-    TRIAGE, DISPATCH, EVALUATE, THINKING, ROUTER, 
-    SEARCH, SENSE, MAPS_NAV, MAPS_THINK, MAPS_SURGEON, SYNTAX_GATE, ACTUATE, 
-    POST_MORTEM, INTERVENE
+    DISPATCH,
+    EVALUATE,
+    THINKING,
+    MAPS_NAV,
+    MAPS_THINK,
+    MAPS_SURGEON,
+    SYNTAX_GATE,
+    ACTUATE,
+    POST_MORTEM,
+    INTERVENE,
+    FILE_EXPLORER,
+    SPAWN,
 )
-from ariadne.tui import AriadneApp, StateTransitionMessage
+from ariadne.tui import AriadneApp
+
 
 # Setup logging
 def setup_logging(log_level="INFO", tui_mode=False):
     # Clear existing handlers
     for handler in logging.root.handlers[:]:
         logging.root.removeHandler(handler)
-        
+
     if not tui_mode:
         logging.basicConfig(
             level=getattr(logging, log_level.upper()),
@@ -31,6 +41,7 @@ def setup_logging(log_level="INFO", tui_mode=False):
         # Just set level, no handlers. TUI will add its own.
         logging.root.setLevel(getattr(logging, log_level.upper()))
 
+
 logger = logging.getLogger("ariadne.core")
 
 
@@ -38,20 +49,18 @@ class ConfigManager:
     """
     Manages state-specific LLM configurations from a JSON file.
     """
+
     def __init__(self, config_path: str = "ariadne_config.json"):
         self.config = {
             "default": {
                 "model": "openai/llama-cpp",
                 "api_base": "http://localhost:8080/v1",
                 "api_key": "none",
-                "params": {
-                    "temperature": 0.0,
-                    "max_tokens": 4096
-                }
+                "params": {"temperature": 0.0, "max_tokens": 4096},
             },
-            "states": {}
+            "states": {},
         }
-        
+
         if os.path.exists(config_path):
             try:
                 with open(config_path, "r") as f:
@@ -65,7 +74,7 @@ class ConfigManager:
                                 self.config["default"][k] = v
                     if "states" in user_config:
                         self.config["states"].update(user_config["states"])
-                    
+
                     # Merge editor config
                     if "editor" in user_config:
                         if "editor" not in self.config:
@@ -74,17 +83,19 @@ class ConfigManager:
 
                 logger.info(f"Loaded LLM configuration from {config_path}")
             except Exception as e:
-                logger.error(f"Failed to load config {config_path}: {e}. Using defaults.")
+                logger.error(
+                    f"Failed to load config {config_path}: {e}. Using defaults."
+                )
 
     def get_model_info(self, state_name: str) -> Dict[str, Any]:
         """
         Returns the merged model configuration for a specific state.
         """
         # Start with default
-        info = json.loads(json.dumps(self.config["default"])) # Deep copy
-        
+        info = json.loads(json.dumps(self.config["default"]))  # Deep copy
+
         state_config = self.config["states"].get(state_name, {})
-        
+
         # Merge state-specific config
         for k, v in state_config.items():
             if k == "params" and isinstance(v, dict):
@@ -108,22 +119,28 @@ class ProfileLoader:
     """
     Handles loading language profiles from JSON or hardcoded defaults.
     """
+
     @staticmethod
     def load_profile(name: str):
         engine_root = os.path.dirname(os.path.abspath(__file__))
-        profile_path = os.path.join(engine_root, "ariadne", "profiles", f"{name.lower()}.json")
-        
+        profile_path = os.path.join(
+            engine_root, "ariadne", "profiles", f"{name.lower()}.json"
+        )
+
         if os.path.exists(profile_path):
             try:
                 with open(profile_path, "r") as f:
                     config = json.load(f)
                 from ariadne.profiles.base import DynamicProfile
+
                 return DynamicProfile(config)
             except Exception as e:
                 logger.error(f"Failed to load JSON profile {name}: {e}")
                 raise
 
-        raise ValueError(f"Profile configuration not found for: {name} (Checked {profile_path})")
+        raise ValueError(
+            f"Profile configuration not found for: {name} (Checked {profile_path})"
+        )
 
     @staticmethod
     def expand_targets(targets: List[str], profile) -> List[str]:
@@ -134,7 +151,11 @@ class ProfileLoader:
                 expanded.append(t)
             elif os.path.isdir(t):
                 for root, dirs, files in os.walk(t):
-                    dirs[:] = [d for d in dirs if not ignore_handler.is_ignored(os.path.join(root, d))]
+                    dirs[:] = [
+                        d
+                        for d in dirs
+                        if not ignore_handler.is_ignored(os.path.join(root, d))
+                    ]
                     for f in files:
                         full_path = os.path.join(root, f)
                         if any(full_path.endswith(ext) for ext in profile.extensions):
@@ -147,56 +168,83 @@ class IgnoreHandler:
     """
     Handles .ariadneignore and .gitignore logic.
     """
+
     def __init__(self):
         self.ignore_patterns = [".venv", "target", ".git", "__pycache__", ".ruff_cache"]
         if os.path.exists(".ariadneignore"):
             with open(".ariadneignore", "r") as f:
-                self.ignore_patterns.extend([line.strip() for line in f if line.strip() and not line.startswith("#")])
+                self.ignore_patterns.extend(
+                    [
+                        line.strip()
+                        for line in f
+                        if line.strip() and not line.startswith("#")
+                    ]
+                )
 
     def is_ignored(self, path: str) -> bool:
         return any(pattern in path for pattern in self.ignore_patterns)
 
 
 def run_engine_loop(
-    context: EngineContext, 
-    states_registry: Dict[str, State], 
-    initial_payload: Any, 
+    context: EngineContext,
+    states_registry: Dict[str, State],
+    initial_payload: Any,
     max_turns: int = 40,
-    global_timeout: int = 1800
+    global_timeout: int = 1800,
 ):
     """
-    Executes the HFSM loop. Emits events via context for UI/Logging.
+    Executes the HFSM loop. Emits events via UI/Logging.
     """
     payload = initial_payload
-    
-    intent = getattr(payload, "intent", payload.get("intent", "")) if payload else ""
+
+    # Get intent from payload (supports both dict and JobPayload)
+    if payload is None:
+        intent = ""
+    elif isinstance(payload, dict):
+        intent = payload.get("intent", "")
+    else:
+        # JobPayload or other object
+        intent = getattr(payload, "intent", "")
     context.emit("INTENT_UPDATE", {"intent": intent})
 
     start_wall_time = time.time()
     turn_count = 0
-    
+
     while context.current_state != "FINISH":
         # Safety Checks
         elapsed_total = time.time() - start_wall_time
         if elapsed_total > global_timeout:
             logger.error(f"Global timeout reached ({global_timeout}s). Aborting.")
             context.transition("ABORT")
-        
-        if turn_count >= max_turns and context.current_state not in ["SUCCESS", "ABORT", "POST_MORTEM"]:
+
+        if turn_count >= max_turns and context.current_state not in [
+            "SUCCESS",
+            "ABORT",
+            "POST_MORTEM",
+        ]:
             logger.error(f"Maximum transitions reached ({max_turns}). Aborting.")
             context.transition("ABORT")
 
-        logger.info(f"--- TICKING: {context.current_state} (Turn {turn_count+1}, {int(elapsed_total)}s) ---")
-        
+        logger.info(
+            f"--- TICKING: {context.current_state} (Turn {turn_count + 1}, {int(elapsed_total)}s) ---"
+        )
+
         # Terminal states transition to POST_MORTEM
         if context.current_state in ["SUCCESS", "ABORT"]:
-             context.transition("POST_MORTEM")
-             logger.info(f"Terminal state {context.current_state} reached. Transitioning to POST_MORTEM.")
+            context.transition("POST_MORTEM")
+            logger.info(
+                f"Terminal state {context.current_state} reached. Transitioning to POST_MORTEM."
+            )
 
         # Data-driven UI updates via events
         if hasattr(payload, "plan") and payload.plan:
-            context.emit("PLAN_UPDATE", payload.plan.model_dump() if hasattr(payload.plan, "model_dump") else payload.plan)
-        
+            context.emit(
+                "PLAN_UPDATE",
+                payload.plan.model_dump()
+                if hasattr(payload.plan, "model_dump")
+                else payload.plan,
+            )
+
         if hasattr(payload, "extracted_nodes") and payload.extracted_nodes:
             idx = getattr(payload, "maps_state", {}).get("current_target_index", 0)
             if idx < len(payload.extracted_nodes):
@@ -204,10 +252,17 @@ def run_engine_loop(
                 edits = []
                 if hasattr(payload, "fixed_code") and payload.fixed_code is not None:
                     edits = payload.fixed_code.get("edits", [])
-                context.emit("SURGEON_UPDATE", {"symbol": node["symbol"], "code": node["node_string"], "edits": edits})
+                context.emit(
+                    "SURGEON_UPDATE",
+                    {
+                        "symbol": node["symbol"],
+                        "code": node["node_string"],
+                        "edits": edits,
+                    },
+                )
 
         active_state = states_registry.get(context.current_state)
-        
+
         if not active_state:
             logger.error(f"State {context.current_state} not found!")
             break
@@ -215,7 +270,7 @@ def run_engine_loop(
         start_time = time.time()
         current_state_name, payload = active_state.tick(payload, context)
         elapsed = time.time() - start_time
-        
+
         logger.info(f"[BENCHMARK] {context.current_state} took {elapsed:.2f}s")
         context.transition(current_state_name)
         turn_count += 1
@@ -225,32 +280,54 @@ def run_engine_loop(
             context.transition("ABORT")
 
         if current_state_name == "FINISH":
-             break
-             
+            break
+
     context.emit("STATE_CHANGE", {"state": "FINISH", "turn": turn_count})
     logger.info(f"Engine dropped to terminal state: {context.current_state}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Ariadne ECU: Surgical Code Repair Engine")
+    parser = argparse.ArgumentParser(
+        description="Ariadne ECU: Surgical Code Repair Engine"
+    )
     parser.add_argument("--targets", nargs="+", help="Files or directories to ingest")
     parser.add_argument("--profile", default="rust", help="Language profile to use")
-    parser.add_argument("--config", default="ariadne_config.json", help="Path to LLM configuration JSON")
+    parser.add_argument(
+        "--config", default="ariadne_config.json", help="Path to LLM configuration JSON"
+    )
     parser.add_argument("--log-level", default="INFO", help="Logging level")
-    parser.add_argument("--intent", default="Implement armor mitigation and death state in take_damage method.", help="The user request or coding intent")
-    parser.add_argument("--initial-state", default="INTERVENE", help="The starting state for the engine")
-    parser.add_argument("--tui", action="store_true", help="Enable the Textual Dashboard TUI")
-    parser.add_argument("--headless", action="store_true", help="Run without interactive editor interventions")
-    parser.add_argument("--project-dir", "-C", default=".", help="Set the project working directory")
-    parser.add_argument("--max-turns", type=int, default=40, help="Maximum transitions before aborting")
-    parser.add_argument("--timeout", type=int, default=1800, help="Global timeout in seconds")
+    parser.add_argument(
+        "--intent",
+        default="Implement armor mitigation and death state in take_damage method.",
+        help="The user request or coding intent",
+    )
+    parser.add_argument(
+        "--initial-state", default="INTERVENE", help="The starting state for the engine"
+    )
+    parser.add_argument(
+        "--tui", action="store_true", help="Enable the Textual Dashboard TUI"
+    )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run without interactive editor interventions",
+    )
+    parser.add_argument(
+        "--project-dir", "-C", default=".", help="Set the project working directory"
+    )
+    parser.add_argument(
+        "--max-turns", type=int, default=40, help="Maximum transitions before aborting"
+    )
+    parser.add_argument(
+        "--timeout", type=int, default=1800, help="Global timeout in seconds"
+    )
     args = parser.parse_args()
 
     setup_logging(args.log_level, args.tui)
 
     # Resolve config path before changing directory
     config_path = os.path.abspath(args.config)
-    
+
     # Absolute-ize targets before chdir so we can resolve them cleanly against the new root
     if args.targets:
         abs_targets = [os.path.abspath(t) for t in args.targets]
@@ -259,8 +336,10 @@ def main():
 
     if args.project_dir and args.project_dir != ".":
         os.chdir(args.project_dir)
-        logging.getLogger("ariadne").info(f"Changed project working directory to: {args.project_dir}")
-        
+        logging.getLogger("ariadne").info(
+            f"Changed project working directory to: {args.project_dir}"
+        )
+
     # Convert targets to be relative to the new working directory
     if abs_targets:
         args.targets = [os.path.relpath(t, os.getcwd()) for t in abs_targets]
@@ -268,7 +347,7 @@ def main():
     # 1. Load Configuration and Profile
     config_manager = ConfigManager(config_path)
     profile = ProfileLoader.load_profile(args.profile)
-    
+
     # Inject headless arg into config
     if "editor" not in config_manager.config:
         config_manager.config["editor"] = {}
@@ -277,7 +356,9 @@ def main():
     # 2. Expand Targets (Allow empty if TUI is coming)
     target_files = ProfileLoader.expand_targets(args.targets or ["."], profile)
     if not target_files and not args.tui:
-        logger.critical("No target files found! Check your --targets or .ariadneignore.")
+        logger.critical(
+            "No target files found! Check your --targets or .ariadneignore."
+        )
         return
 
     if target_files:
@@ -288,28 +369,24 @@ def main():
     # 3. Registry Creation Helper
     def create_states(target_files_list: List[str]):
         engine_root = os.path.dirname(os.path.abspath(__file__))
-        rust_test_script = os.path.join(engine_root, "scripts", "run_rust_tests.py")
-        python_test_script = os.path.join(engine_root, "scripts", "run_python_tests.py")
 
         return {
-            "TRIAGE": TRIAGE(config_manager),
             "DISPATCH": DISPATCH(
-                config_manager, 
-                test_filepath=f"test_contract{profile.extensions[0]}", 
+                config_manager,
+                test_filepath=f"test_contract{profile.extensions[0]}",
                 profile=profile,
-                target_files=target_files_list
+                target_files=target_files_list,
             ),
             "EVALUATE": EVALUATE(
-                test_command=f"python {rust_test_script} {target_files_list[0]} test_contract{profile.extensions[0]}" 
-                if target_files_list and profile.name == "Rust" else 
-                f"python {python_test_script} {target_files_list[0]} test_contract{profile.extensions[0]}"
-                if target_files_list else "echo No targets provided"
+                test_command=profile.get_test_command_template().format(
+                    script=os.path.join(
+                        engine_root, "scripts", profile.get_test_runner_script()
+                    ),
+                    target=target_files_list[0] if target_files_list else "",
+                    contract=f"test_contract{profile.extensions[0]}",
+                )
             ),
             "THINKING": THINKING(config_manager, profile),
-            "ROUTER": ROUTER(config_manager),
-            "SEARCH": SEARCH(config_manager, profile),
-
-            "SENSE": SENSE(profile),
             "MAPS_NAV": MAPS_NAV(config_manager, profile),
             "MAPS_THINK": MAPS_THINK(config_manager, profile),
             "MAPS_SURGEON": MAPS_SURGEON(config_manager, profile),
@@ -317,6 +394,8 @@ def main():
             "ACTUATE": ACTUATE(),
             "POST_MORTEM": POST_MORTEM(config_manager),
             "INTERVENE": INTERVENE(config_manager),
+            "FILE_EXPLORER": FILE_EXPLORER(config_manager, profile),
+            "SPAWN": SPAWN(config_manager),
         }
 
     states_registry = create_states(target_files)
@@ -326,13 +405,13 @@ def main():
         initial_state=args.initial_state.upper(),
         intent=args.intent or "",
         target_files=target_files,
-        profile=profile
+        profile=profile,
     )
-    
+
     # 5. Launch UI or CLI Loop
     if args.tui:
         app = AriadneApp()
-        
+
         # Subscribe TUI to engine events
         context.subscribe(app.post_message)
         # Provide context to app for /stop slash command
@@ -340,62 +419,49 @@ def main():
 
         def start_engine_callback(setup_data: Dict[str, Any]):
             nonlocal target_files, states_registry
-            
+
             new_intent = setup_data.get("intent", args.intent)
             new_targets_raw = setup_data.get("targets", "")
-            
+
             # Re-expand targets if they changed in UI
             if isinstance(new_targets_raw, list):
                 target_files = ProfileLoader.expand_targets(new_targets_raw, profile)
             elif isinstance(new_targets_raw, str) and new_targets_raw.strip():
-                new_targets_list = [t.strip() for t in new_targets_raw.split(",") if t.strip()]
+                new_targets_list = [
+                    t.strip() for t in new_targets_raw.split(",") if t.strip()
+                ]
                 target_files = ProfileLoader.expand_targets(new_targets_list, profile)
-            
+
             # Re-build states
             states_registry = create_states(target_files)
-            
-            # Determine start state
-            start_state = "TRIAGE" if len(new_intent) > 15 else "INTERVENE"
+
+            start_state = "MAPS_NAV"
             context.current_state = start_state
 
-            current_payload = None
-            if start_state == "TRIAGE":
-                current_payload = {"input": new_intent, "target_files": target_files}
-            else:
-                current_payload = {
-                    "intent": new_intent, 
-                    "target_files": target_files, 
-                    "needs_elaboration": True, 
-                    "next_headless_state": "TRIAGE"
-                }
-            
+            current_payload = JobPayload(intent=new_intent, target_files=target_files)
+
             engine_thread = threading.Thread(
                 target=run_engine_loop,
-                args=(context, states_registry, current_payload, args.max_turns, args.timeout),
-                daemon=True
+                args=(
+                    context,
+                    states_registry,
+                    current_payload,
+                    args.max_turns,
+                    args.timeout,
+                ),
+                daemon=True,
             )
             engine_thread.start()
 
         app.start_callback = start_engine_callback
         app.initial_setup_data = {
             "intent": args.intent,
-            "targets": ", ".join(args.targets) if args.targets else ""
+            "targets": ", ".join(args.targets) if args.targets else "",
         }
-        
+
         app.run()
     else:
-        # CLI Mode
-        if context.current_state == "TRIAGE":
-            payload = {"input": args.intent, "target_files": target_files}
-        elif context.current_state == "INTERVENE":
-            payload = {
-                "intent": args.intent, 
-                "target_files": target_files, 
-                "needs_elaboration": True, 
-                "next_headless_state": "TRIAGE"
-            }
-        else:
-            payload = JobPayload(intent=args.intent, target_files=target_files)
+        payload = JobPayload(intent=args.intent, target_files=target_files)
 
         run_engine_loop(context, states_registry, payload, args.max_turns, args.timeout)
 

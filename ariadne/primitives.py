@@ -24,7 +24,9 @@ class QueryAstGrep(State):
         super().__init__("QUERY_AST_GREP")
         self.language = language
 
-    def tick(self, payload: Dict[str, Any], context: 'EngineContext') -> Tuple[str, List[Dict[str, Any]]]:
+    def tick(
+        self, payload: Dict[str, Any], context: "EngineContext"
+    ) -> Tuple[str, List[Dict[str, Any]]]:
         filepath = payload.get("filepath")
         pattern = payload.get("pattern")
         rule = payload.get("rule")
@@ -38,7 +40,7 @@ class QueryAstGrep(State):
                 source = f.read()
 
             root = SgRoot(source, self.language)
-            
+
             matches = []
             if rule:
                 # Rule-based search (more complex)
@@ -57,9 +59,9 @@ class QueryAstGrep(State):
                     "end_byte": range_info.end.index,
                     "start_line": range_info.start.line,
                     "start_col": range_info.start.column,
-                    "node_type": node.kind()
+                    "node_type": node.kind(),
                 }
-                
+
                 if requested_vars:
                     vars_data = {}
                     for v in requested_vars:
@@ -89,45 +91,50 @@ class QueryMCP(State):
     def __init__(self):
         super().__init__("QUERY_MCP")
 
-    async def _query(self, command: str, args: List[str], tool_name: str, tool_args: Dict[str, Any]) -> Any:
+    async def _query(
+        self, command: str, args: List[str], tool_name: str, tool_args: Dict[str, Any]
+    ) -> Any:
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
 
-        server_params = StdioServerParameters(
-            command=command,
-            args=args,
-            env=None
-        )
+        server_params = StdioServerParameters(command=command, args=args, env=None)
 
         async with stdio_client(server_params) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
-                
+
                 # Call the tool
                 result = await session.call_tool(tool_name, tool_args)
                 return result
 
-    def tick(self, payload: Dict[str, Any], context: 'EngineContext') -> Tuple[str, Any]:
+    def tick(
+        self, payload: Dict[str, Any], context: "EngineContext"
+    ) -> Tuple[str, Any]:
         command = payload.get("command")
         args = payload.get("args", [])
         tool_name = payload.get("tool_name")
         tool_args = payload.get("tool_args", {})
 
         if not command or not tool_name:
-            logger.warning(f"QueryMCP skipped: Missing command ({command}) or tool_name ({tool_name})")
+            logger.warning(
+                f"QueryMCP skipped: Missing command ({command}) or tool_name ({tool_name})"
+            )
             return "ERROR", "Missing parameters"
 
         try:
             # Run the async query in a synchronous way for the HFSM
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            result = loop.run_until_complete(self._query(command, args, tool_name, tool_args))
+            result = loop.run_until_complete(
+                self._query(command, args, tool_name, tool_args)
+            )
             loop.close()
-            
+
             return "SUCCESS", result
         except Exception as e:
             logger.error(f"QueryMCP Error: {e}")
             import traceback
+
             logger.error(traceback.format_exc())
             return "ERROR", str(e)
 
@@ -149,13 +156,17 @@ class ExtractAST(State):
 
         self.parser = tree_sitter.Parser(self.language)
 
-    def tick(self, payload: Dict[str, Any], context: 'EngineContext') -> Tuple[str, List[str]]:
+    def tick(
+        self, payload: Dict[str, Any], context: "EngineContext"
+    ) -> Tuple[str, List[str]]:
         filepath = payload.get("filepath")
         query_string = payload.get("query_string")
         capture_name = payload.get("capture_name", "node")
 
         if not filepath or not query_string:
-            logger.warning(f"ExtractAST skipped: Missing filepath ({filepath}) or query_string ({query_string})")
+            logger.warning(
+                f"ExtractAST skipped: Missing filepath ({filepath}) or query_string ({query_string})"
+            )
             return "ERROR", []
 
         try:
@@ -169,7 +180,7 @@ class ExtractAST(State):
 
             results = []  # Initialize results list
             captures = query_cursor.captures(tree.root_node)
-            
+
             # Normalize captures to List[Tuple[Node, str]]
             normalized_captures = []
             if isinstance(captures, dict):
@@ -205,6 +216,7 @@ class QueryLLM(State):
 
     def __init__(self, model: Optional[str] = None, api_base: Optional[str] = None):
         import os
+
         super().__init__("QUERY_LLM")
 
         # 1. Prioritize passed args, then Env, then local defaults
@@ -216,7 +228,7 @@ class QueryLLM(State):
             "openai/llama-cpp" if "localhost" in self.api_base else "ollama/llama3"
         )
         self.model = model or os.getenv("ARIADNE_MODEL") or default_model
-        
+
         # Ensure openai/ prefix if hitting localhost to trigger OpenAI provider in litellm
         if "localhost" in self.api_base and not self.model.startswith("openai/"):
             self.model = f"openai/{self.model}"
@@ -224,7 +236,9 @@ class QueryLLM(State):
         # Only use API key if provided, otherwise 'none' for local servers
         self.api_key = os.getenv("ARIADNE_API_KEY") or "none"
 
-    def tick(self, payload: Dict[str, Any], context: 'EngineContext') -> Tuple[str, Any]:
+    def tick(
+        self, payload: Dict[str, Any], context: "EngineContext"
+    ) -> Tuple[str, Any]:
         import litellm
         import re
         import tiktoken
@@ -236,7 +250,7 @@ class QueryLLM(State):
 
         # Empirical Token Measurement
         try:
-            encoding = tiktoken.get_encoding("cl100k_base") # Standard for GPT-4/Turbo
+            encoding = tiktoken.get_encoding("cl100k_base")  # Standard for GPT-4/Turbo
             input_tokens = len(encoding.encode(system + user))
         except Exception:
             input_tokens = 0
@@ -247,9 +261,8 @@ class QueryLLM(State):
 
         messages = [
             {"role": "system", "content": system},
-            {"role": "user", "content": user}
+            {"role": "user", "content": user},
         ]
-
 
         try:
             # Prepare arguments
@@ -258,29 +271,32 @@ class QueryLLM(State):
                 "messages": messages,
                 "api_base": self.api_base,
                 "timeout": 300,
-                "stream": True # Always stream for UX polish
+                "stream": True,  # Always stream for UX polish
             }
             completion_args.update(params)
-            
+
             if self.api_key:
                 completion_args["api_key"] = self.api_key
-            
+
             # Use native structured output if response_model is provided
             if response_model:
                 completion_args["response_format"] = response_model
                 # Structured output + streaming usually requires buffering
-            
+
             content = ""
             reasoning = ""
-            
+
             # Identify role for UI
             role_label = "Ariadne"
-            if "Architect" in system: role_label = "Architect"
-            elif "Surgeon" in system: role_label = "Surgeon"
-            elif "Router" in system: role_label = "Router"
+            if "Architect" in system:
+                role_label = "Architect"
+            elif "Surgeon" in system:
+                role_label = "Surgeon"
+            elif "Router" in system:
+                role_label = "Router"
 
             response_gen = litellm.completion(**completion_args)
-            
+
             for chunk in response_gen:
                 # Check for context abort (Stop button or turns limit)
                 if context.stop_requested:
@@ -288,49 +304,69 @@ class QueryLLM(State):
                     return "ABORT", "Interrupted by user."
 
                 delta = chunk.choices[0].delta
-                
+
                 # Handle standard content
                 chunk_content = getattr(delta, "content", None)
                 if chunk_content:
                     content += chunk_content
-                
+
                 # Handle reasoning content
                 chunk_reasoning = getattr(delta, "reasoning_content", None)
                 if not chunk_reasoning and hasattr(delta, "provider_specific_fields"):
                     psf = delta.provider_specific_fields or {}
                     chunk_reasoning = psf.get("reasoning_content")
-                
+
                 if chunk_reasoning:
                     reasoning += chunk_reasoning
-                
+
                 # Emit streaming event for UI
-                context.emit("LLM_STREAM", {
-                    "role": role_label,
-                    "content": content,
-                    "reasoning": reasoning
-                })
+                context.emit(
+                    "LLM_STREAM",
+                    {"role": role_label, "content": content, "reasoning": reasoning},
+                )
 
             # Post-stream processing
             if reasoning:
                 logger.info(f"[LLM REASONING]\n{reasoning}")
                 # Salvage logic: If main content is empty but reasoning contains the answer
                 if not content.strip():
-                    logger.warning("Main content empty. Attempting to salvage from reasoning_content...")
+                    logger.warning(
+                        "Main content empty. Attempting to salvage from reasoning_content..."
+                    )
                     json_patterns = [
                         r"(\{\s*\"reasoning\":.*?\})",
                         r"(\{\s*\"action\":.*?\})",
                         r"(\{\s*\"steps\":.*?\})",
-                        r"(\{.*\})" # Fallback
+                        r"(\{.*\})",  # Fallback
                     ]
-                    
+
                     found_json = False
-                    valid_states = ["SEARCH", "DISPATCH", "MAPS_NAV", "THINKING", "ABORT", "ROUTER", "SUCCESS", "SENSE", "MAPS_THINK", "MAPS_SURGEON", "SYNTAX_GATE", "ACTUATE", "INTERVENE"]
-                    
+                    valid_states = [
+                        "DISPATCH",
+                        "MAPS_NAV",
+                        "THINKING",
+                        "ABORT",
+                        "SUCCESS",
+                        "MAPS_THINK",
+                        "MAPS_SURGEON",
+                        "SYNTAX_GATE",
+                        "ACTUATE",
+                        "INTERVENE",
+                        "FILE_EXPLORER",
+                        "SPAWN",
+                        "EVALUATE",
+                        "POST_MORTEM",
+                    ]
+
                     for pattern in json_patterns:
                         matches = re.finditer(pattern, reasoning, re.DOTALL)
                         for match in matches:
                             candidate = match.group(1)
-                            if '\"...\"' in candidate or '<string>' in candidate or '<next_state>' in candidate:
+                            if (
+                                '"..."' in candidate
+                                or "<string>" in candidate
+                                or "<next_state>" in candidate
+                            ):
                                 continue
                             if "next_state" in candidate:
                                 if not any(f'"{s}"' in candidate for s in valid_states):
@@ -340,28 +376,53 @@ class QueryLLM(State):
                             content = candidate
                             found_json = True
                             break
-                        if found_json: break
-                    
+                        if found_json:
+                            break
+
                     if not found_json:
-                        code_match = re.search(r"```(?:\w+)?\n(.*?)\n```", reasoning, re.DOTALL)
+                        code_match = re.search(
+                            r"```(?:\w+)?\n(.*?)\n```", reasoning, re.DOTALL
+                        )
                         if code_match:
                             content = code_match.group(1)
                         else:
-                            paragraphs = [p.strip() for p in reasoning.split("\n\n") if p.strip()]
-                            meta_markers = ["self-correction", "thinking process", "note:", "prompt asks", "analyzing", "identifying", "identifying key", "draft the intent", "refine for conciseness", "constraint:", "task:"]
+                            paragraphs = [
+                                p.strip() for p in reasoning.split("\n\n") if p.strip()
+                            ]
+                            meta_markers = [
+                                "self-correction",
+                                "thinking process",
+                                "note:",
+                                "prompt asks",
+                                "analyzing",
+                                "identifying",
+                                "identifying key",
+                                "draft the intent",
+                                "refine for conciseness",
+                                "constraint:",
+                                "task:",
+                            ]
                             best_candidate = ""
                             for p in reversed(paragraphs):
                                 p_lower = p.lower()
-                                if any(m in p_lower for m in meta_markers): continue
-                                if len(p) > 400 and p.count("*") > 2: continue
+                                if any(m in p_lower for m in meta_markers):
+                                    continue
+                                if len(p) > 400 and p.count("*") > 2:
+                                    continue
                                 best_candidate = p
-                                break                            
+                                break
                             if best_candidate:
                                 content = best_candidate
-                                clean_headers = ["final output generation:", "final output:", "objective:", "summary:", "technical intent:"]
+                                clean_headers = [
+                                    "final output generation:",
+                                    "final output:",
+                                    "objective:",
+                                    "summary:",
+                                    "technical intent:",
+                                ]
                                 for ch in clean_headers:
                                     if content.lower().startswith(ch):
-                                        content = content[len(ch):].strip()
+                                        content = content[len(ch) :].strip()
                                         break
                             elif paragraphs:
                                 content = paragraphs[-1]
@@ -371,16 +432,19 @@ class QueryLLM(State):
                 output_tokens = len(encoding.encode(content))
             except Exception:
                 output_tokens = 0
-            
-            context.total_tokens += (input_tokens + output_tokens)
-            logger.info(f"[TOKEN BUDGET] Output: ~{output_tokens} tokens | Session Total: ~{context.total_tokens}")
+
+            context.total_tokens += input_tokens + output_tokens
+            logger.info(
+                f"[TOKEN BUDGET] Output: ~{output_tokens} tokens | Session Total: ~{context.total_tokens}"
+            )
 
             if response_model:
                 try:
                     import json
+
                     json_str = content
                     if "{" in content:
-                        json_str = content[content.find("{"):content.rfind("}")+1]
+                        json_str = content[content.find("{") : content.rfind("}") + 1]
                     parsed = response_model.model_validate_json(json_str)
                     return "SUCCESS", parsed
                 except Exception as e:
@@ -391,6 +455,7 @@ class QueryLLM(State):
         except Exception as e:
             logger.error(f"QueryLLM Error: {e}")
             import traceback
+
             logger.error(traceback.format_exc())
             return "ERROR", str(e)
 
@@ -405,17 +470,17 @@ class ExecuteCommand(State):
     def __init__(self):
         super().__init__("EXECUTE_COMMAND")
 
-    def tick(self, command: str, context: 'EngineContext') -> Tuple[str, str]:
+    def tick(self, command: str, context: "EngineContext") -> Tuple[str, str]:
         try:
             # shell=True for terminal-like behavior, timeout to prevent hanging
             result = subprocess.run(
                 command, shell=True, capture_output=True, text=True, timeout=120
             )
             output = f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
-            
+
             # Emit stdout event for UI
             context.emit("STDOUT", {"text": output})
-            
+
             status = "SUCCESS" if result.returncode == 0 else "FAILURE"
             return status, output
         except subprocess.TimeoutExpired:
@@ -435,23 +500,27 @@ class PromptUser(State):
     def __init__(self):
         super().__init__("PROMPT_USER")
 
-    def tick(self, proposal: str, context: 'EngineContext') -> Tuple[str, bool]:
+    def tick(self, proposal: str, context: "EngineContext") -> Tuple[str, bool]:
         import os
-        
+
         if os.getenv("ARIADNE_AUTO_ACCEPT") == "true":
             logger.info("Auto-accepting proposal due to ARIADNE_AUTO_ACCEPT=true")
             return "ACCEPTED", True
 
         # Emit event for UI to handle
         context.emit("USER_PROMPT", {"proposal": proposal})
-        
+
         # This blocks the engine thread until UI calls context.submit_user_response()
         response = context.wait_for_user()
-        
+
         if response is None:
             return "REJECTED", False
-            
-        approved = response.get("approved", False) if isinstance(response, dict) else bool(response)
+
+        approved = (
+            response.get("approved", False)
+            if isinstance(response, dict)
+            else bool(response)
+        )
         return "ACCEPTED" if approved else "REJECTED", approved
 
 
@@ -465,7 +534,9 @@ class WriteFile(State):
     def __init__(self):
         super().__init__("WRITE_FILE")
 
-    def tick(self, payload: Dict[str, str], context: 'EngineContext') -> Tuple[str, str]:
+    def tick(
+        self, payload: Dict[str, str], context: "EngineContext"
+    ) -> Tuple[str, str]:
         filepath = payload.get("filepath")
         content = payload.get("content")
         try:
@@ -487,7 +558,9 @@ class ASTSplice(State):
     def __init__(self):
         super().__init__("AST_SPLICE")
 
-    def tick(self, payload: Dict[str, Any], context: 'EngineContext') -> Tuple[str, str]:
+    def tick(
+        self, payload: Dict[str, Any], context: "EngineContext"
+    ) -> Tuple[str, str]:
         filepath = payload.get("filepath")
         edits = payload.get("edits", [])
 
@@ -506,7 +579,9 @@ class ASTSplice(State):
             for edit in edits:
                 new_code = edit["new_code"]
                 if "```" in new_code:
-                    logger.error("ASTSplice rejected: Code contains markdown backticks.")
+                    logger.error(
+                        "ASTSplice rejected: Code contains markdown backticks."
+                    )
                     return "REJECTED", "Markdown detected"
 
                 new_code_bytes = new_code.encode("utf-8")
@@ -545,7 +620,9 @@ class BlockSplice(State):
     def __init__(self):
         super().__init__("BLOCK_SPLICE")
 
-    def tick(self, payload: Dict[str, Any], context: 'EngineContext') -> Tuple[str, str]:
+    def tick(
+        self, payload: Dict[str, Any], context: "EngineContext"
+    ) -> Tuple[str, str]:
         filepath = payload.get("filepath")
         edits = payload.get("edits", [])
 
@@ -574,20 +651,22 @@ class BlockSplice(State):
                     # Legacy SEARCH/REPLACE protocol
                     search_text = edit["search_text"]
                     replace_text = edit["replace_text"]
-                    
+
                     node_bytes = new_source_code[start_byte:end_byte]
                     node_text = node_bytes.decode("utf-8")
-                    
+
                     search_norm = search_text.replace("\r\n", "\n")
                     node_norm = node_text.replace("\r\n", "\n")
-                    
+
                     if search_norm not in node_norm:
-                        logger.error(f"BlockSplice rejected: search_text not found in target node.")
+                        logger.error(
+                            f"BlockSplice rejected: search_text not found in target node."
+                        )
                         return "REJECTED", "search_text not found in node"
 
                     replace_norm = replace_text.replace("\r\n", "\n")
                     new_node_text_norm = node_norm.replace(search_norm, replace_norm, 1)
-                    
+
                     if b"\r\n" in node_bytes:
                         new_node_text = new_node_text_norm.replace("\n", "\r\n")
                     else:

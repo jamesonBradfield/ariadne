@@ -3,6 +3,10 @@
     "language_id": "python",
     "extensions": [".py"],
     "standard_headers": "",
+    "test_runner": {
+        "script": "run_python_tests.py"
+    },
+    "test_command_template": "python {script} {target} {contract}",
     "ast_grep_lang": "python",
     "ast_grep_patterns": {
         "symbol": [

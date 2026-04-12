@@ -3,6 +3,10 @@
     "language_id": "rust",
     "extensions": [".rs"],
     "standard_headers": "use godot::prelude::*;\n",
+    "test_runner": {
+        "script": "run_rust_tests.py"
+    },
+    "test_command_template": "python {script} {target} {contract}",
     "ast_grep_lang": "rust",
     "ast_grep_patterns": {
         "symbol": [

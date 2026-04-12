@@ -1,0 +1,29 @@
+{
+    "name": "SandboxedPython",
+    "language_id": "python",
+    "extensions": [".py"],
+    "standard_headers": "",
+    "test_runner": {
+        "script": "run_sandboxed_python_tests.py"
+    },
+    "test_command_template": "python {script} {target} {contract}",
+    "ast_grep_lang": "python",
+    "ast_grep_patterns": {
+        "symbol": [
+            "def {symbol_name}($$$): $$$",
+            "class {symbol_name}: $$$",
+            "class {symbol_name}($$$): $$$"
+        ],
+        "all_symbols": [
+            ["def $NAME($$$): $$$", "$NAME"],
+            ["class $NAME: $$$", "$NAME"],
+            ["class $NAME($$$): $$$", "$NAME"]
+        ]
+    },
+    "tree_sitter_queries": {
+        "skeleton": "(function_definition body: (block) @body) (class_definition body: (block) @body)",
+        "symbol": "(function_definition name: (identifier) @name (#eq? @name \"{symbol_name}\")) @symbol (class_definition name: (identifier) @name (#eq? @name \"{symbol_name}\")) @symbol"
+    },
+    "symbol_capture_name": "symbol",
+    "parent_block_types": ["class_definition", "module", "function_definition"]
+}
