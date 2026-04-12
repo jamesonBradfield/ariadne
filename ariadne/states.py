@@ -412,7 +412,6 @@ class THINKING(State):
             "current_step_index": 0,
             "steps": [step.model_dump() for step in plan.steps],
         }
-        job.extracted_nodes = []
 
         return "MAPS_NAV", job
 
@@ -483,7 +482,7 @@ class MAPS_NAV(State):
                     "node_string": node["code"],
                     "start_byte": node["start_byte"],
                     "end_byte": node["end_byte"],
-                    "node_type": node["node_type"],
+                    "node_type": node.get("node_type", node.get("type", "unknown")),
                 }
             )
 
@@ -633,9 +632,14 @@ class MAPS_SURGEON(State):
         action = result.action
         code = result.code
         target_id = job.maps_state["locked_node_id"]
-        id_map = job.maps_state["id_map"]
 
-        t_start, t_end = id_map[target_id]
+        # Use locked_range if available, otherwise look up in id_map
+        if "locked_range" in job.maps_state:
+            t_start, t_end = job.maps_state["locked_range"]
+        else:
+            id_map = job.maps_state["id_map"]
+            t_start, t_end = id_map[target_id]
+
         edit = {"start_byte": t_start, "end_byte": t_end, "new_code": code}
 
         if action == "delete":
@@ -975,6 +979,5 @@ class SPAWN(State):
             "current_step_index": 0,
             "steps": [step.model_dump() for step in plan.steps],
         }
-        job.extracted_nodes = []
 
         return "MAPS_NAV", job
