@@ -1,45 +1,87 @@
 {
   "default": {
-    "model": "openai/llama-cpp",
-    "api_base": "http://100.92.54.124:8080/v1",
+    "model": "openai/Qwen3.5-9B-Q6_K.gguf",
+    "api_base": "http://localhost:8080/v1",
     "api_key": "none",
     "params": {
-      "temperature": 0.0,
-      "max_tokens": 4096
+      "temperature": 0.1,
+      "max_tokens": 4096,
+      "stop": ["[TURN_DONE]"],
+      "response_format": { "type": "json_object" }
     }
   },
+  "editor": {
+    "command_template": "nvim +{line} {file}",
+    "rpc_command_template": "nvim --server 127.0.0.1:6666 --remote +{line} {file}",
+    "blocking": true,
+    "headless": true
+  },
   "states": {
-    "TRIAGE": {
-      "system_prompt": "You are a triage agent. Output ONLY the technical intent. NO yapping. NO preamble. Output raw text only.",
-      "user_prompt_template": "{{input}}",
-      "params": { "max_tokens": 50 }
-    },
     "DISPATCH": {
-      "system_prompt": "You are a {{language}} test generator. Rules:\n1. ONLY pick names from the 'API Surface' provided.\n2. DO NOT invent new types or functions (e.g. if 'Entity' exists, DO NOT use 'Hero').\n3. Output ONLY #[test] functions. NO markdown. NO explanations.",
+      "system_prompt": "You are a {{language}} test generator. Output ONLY a JSON object with the key 'test_code'. Use ONLY names from the API Surface. Do not reason.\n\nExample Output:\n{\"test_code\": \"#[test]\\nfn test_it() { ... }\"}[TURN_DONE]",
       "user_prompt_template": "Intent: {{intent}}\n\n{{language}} API Surface:\n{{skeleton_context}}",
-      "post_process": "strip_markdown"
+      "params": {
+        "max_tokens": 4096
+      }
     },
     "THINKING": {
-      "system_prompt": "You are an Architect. Create a logical repair plan. Rules:\n1. Use ONLY names from 'Available Symbols'.\n2. Compare 'Test Code' and 'Skeletons' to find naming mismatches (e.g. Test uses 'Hero' but Source has 'Entity').\n3. Output RAW JSON: {\"reasoning\": \"...\", \"steps\": [{\"symbol\": \"...\"}]}",
+      "system_prompt": "Task: Create a logical repair plan. Output ONLY a JSON object. Do not reason. Rule: If ADDING a method, you MUST pick an EXISTING symbol from 'Available Symbols' to serve as an anchor.\n\nExample Output:\n{\"reasoning\": \"Adding missing method, using init as anchor.\", \"steps\": [{\"symbol\": \"init\"}]}[TURN_DONE]",
       "user_prompt_template": "Intent: {{intent}}\nTest Code: {{test_code}}\nErrors: {{test_stdout}}\nAvailable: {{available_symbols}}\nSkeletons: {{skeletons}}",
-      "params": { "max_tokens": 512 },
-      "post_process": "extract_json"
+      "params": {
+        "max_tokens": 4096
+      }
     },
-    "MAPS": {
-      "system_prompt": "You are the Micro AST Procedural Surgeon (MAPS), an expert system designed to perform precise, surgical edits on code. Your sole function is to analyze the provided code and output a SEARCH/REPLACE block that modifies it.\n\n**Output Format Requirements:**\n1. **Format:** You MUST output the result strictly in the following SEARCH/REPLACE format:\n<<<< SEARCH\n[Exact lines to be replaced]\n====\n>>>> REPLACE\n[New lines to replace the search block]\n>>>>\n\n2. **Exact Matching:** The SEARCH block MUST match the target code EXACTLY, bit-for-bit, including all whitespace, indentation, and comments. Any deviation will cause the replacement to fail.\n3. **Context:** To ensure uniqueness and prevent accidental replacements in similar code structures, you SHOULD include surrounding context lines (e.g., 2-4 lines before and after the target) within the SEARCH block.\n4. **No JSON:** You are FORBIDDEN from outputting JSON, markdown code fences (```), or any other formatting wrappers. Output ONLY the raw SEARCH/REPLACE block.\n\nBegin your analysis and output the modified code immediately.",
-      "user_prompt_template": "Intent: {{intent}}\n{{error_context}}\nTarget Symbol: {{current_symbol}}\nCurrent Node: {{current_node_type}}\n\nTarget Code:\n```\n{{node_text}}\n```",
-      "params": { "max_tokens": 1024 },
-      "post_process": "extract_search_replace"
+    "MAPS_NAV": {
+      "system_prompt": "Task: Navigate AST (Pushdown Automata). Output ONLY a JSON object. Do not reason.\n\nRules:\n1. Your context is constrained to the IMMEDIATE children of the current depth.\n2. Use 'zoom(node_id)' to step deeper into a specific block.\n3. Use 'up' to return to the parent layer.\n4. Use 'select(node_id)' once you see the exact line or range you want to replace, or the anchor where you want to insert code.\n\nExample Output:\n{\"reasoning\": \"Zooming into function body to find return statement.\", \"action\": \"zoom\", \"target_id\": \"2\"}[TURN_DONE]",
+      "user_prompt_template": "Objective: {{intent}}\nCurrent Symbol Focus: '{{current_symbol}}'.\n{{error_context}}\n\nAST View (Level {{depth}}):\n{{ast_view}}",
+      "params": {
+        "max_tokens": 4096
+      }
     },
-"ROUTER": {
-      "system_prompt": "You are the Engine Orchestrator. Decide the next state based on the current job context, recent errors, and the active plan.\n\nSTATE DEFINITIONS:\n- SEARCH: Use this to physically EDIT SOURCE CODE based on the active plan.\n- DISPATCH: Use this ONLY to generate initial unit tests. NEVER use this to fix failing code.\n- THINKING: Use this to generate a new logical plan after analyzing test failures.\n- MAPS: Use this to retry a specific AST edit if there was a syntax error feedback.\n- ABORT: Stop execution if stuck in an unresolvable environment error (e.g., linker/compiler missing) or infinite loop.\n\nValid next states: [SEARCH, DISPATCH, MAPS, THINKING, ABORT]\nOutput a RAW JSON object ONLY: {\"reasoning\": \"...\", \"next_state\": \"...\"}",
-      "user_prompt_template": "Intent: {{intent}}\nRetry Count: {{retry_count}}\nTest Output: {{test_stdout}}\nLLM Feedback: {{llm_feedback}}\nActive Plan: {{plan}}",
-      "params": { "max_tokens": 512 },
-      "post_process": "extract_json"
+    "MAPS_THINK": {
+      "system_prompt": "Task: Draft repair. Output ONLY a JSON object. Do not reason. Rule: ONLY draft the specific node or new code needed. DO NOT include surrounding blocks, impl headers, or duplicate signatures.\n\nExample Output:\n{\"reasoning\": \"Adding missing attribute.\", \"action\": \"fix\", \"draft_code\": \"#[func]\\nfn new_cmd() {}\"}[TURN_DONE]",
+      "user_prompt_template": "Objective: {{intent}}\nCurrent Symbol Focus: '{{current_symbol}}'.\n{{error_context}}\nTarget Node Snippet:\n{{node_snippet}}",
+      "params": {
+        "max_tokens": 4096
+      }
+    },
+    "MAPS_SURGEON": {
+      "system_prompt": "Task: Create surgical command. Output ONLY a JSON object. Do not reason. Actions: replace, insert_before, insert_after, delete.\n\nExample Output:\n{\"reasoning\": \"Inserting after anchor.\", \"action\": \"insert_after\", \"code\": \"fn added() {}\"}[TURN_DONE]",
+      "user_prompt_template": "Draft Fix:\n{{draft_code}}\n\nTarget Node ID: {{target_id}}",
+      "params": {
+        "max_tokens": 4096
+      }
+    },
+    "FILE_EXPLORER": {
+      "system_prompt": "You are a file explorer. Navigate the project to find relevant code for investigation or repair. Output ONLY a JSON object. Do not reason.\n\nActions:\n- ls: List current directory\n- cd: Change directory (use '..' to go up)\n- preview: Show AST skeleton of a file\n- spawn: Use this once you have identified one or more points (files or symbols) to investigate/fix.\n\nExample Output:\n{\"reasoning\": \"Looking for health-related logic.\", \"action\": \"cd\", \"target\": \"src/entities\"}[TURN_DONE]",
+      "user_prompt_template": "Objective: {{intent}}\n\n{{explorer_view}}\n\n{{llm_feedback}}",
+      "params": {
+        "max_tokens": 4096
+      }
+    },
+    "SPAWN": {
+      "system_prompt": "You are a task dispatcher. Convert the identified investigation points into a plan. Output ONLY a JSON object. Do not reason.\n\nExample Output:\n{\"reasoning\": \"Investigation found two relevant files.\", \"targets\": [\"health.rs:take_damage\", \"player.rs:update\"]}[TURN_DONE]",
+      "user_prompt_template": "Objective: {{intent}}",
+      "params": {
+        "max_tokens": 4096
+      }
     },
     "POST_MORTEM": {
-      "system_prompt": "You are a Surgical Post-Mortem Analyst. Summarize the repair session based on the provided metrics. Focus on accuracy and performance.",
-      "user_prompt_template": "Intent: {{intent}}\nFinal Status: {{final_state}}\nRetry Count: {{retry_count}}"
+      "system_prompt": "Analyze interaction history and output a JSON object following the SelfOptimizationResponse schema. Do not reason.[TURN_DONE]",
+      "user_prompt_template": "Interaction History:\n{{history}}",
+      "params": {
+        "max_tokens": 4096
+      }
     }
+  },
+  "mcp": {
+    "enabled": true,
+    "command": "npx",
+    "args": [
+      "-y",
+      "git+https://github.com/jonrad/lsp-mcp",
+      "--lsp",
+      "rust-analyzer"
+    ]
   }
 }

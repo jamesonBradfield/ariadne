@@ -1,0 +1,332 @@
+import logging
+import threading
+import sys
+import subprocess
+import shlex
+import pyperclip
+import os
+from datetime import datetime
+from typing import Any, Dict, Optional, List, Callable, Union
+
+from prompt_toolkit import PromptSession
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.styles import Style
+from prompt_toolkit.patch_stdout import patch_stdout
+from rich.console import Console
+from rich.markdown import Markdown
+from rich.panel import Panel
+from rich.live import Live
+from rich.status import Status
+from rich.table import Table
+
+from .core import AriadneEvent
+
+# Global Console instance pointing to raw stdout to avoid recursion loops
+console = Console(file=sys.__stdout__)
+
+class EngineLogMessage:
+    def __init__(self, record: logging.LogRecord) -> None:
+        self.record = record
+
+class StdoutMessage:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+class ChatUpdateMessage:
+    def __init__(self, sender: str, content: str, style: str = "default") -> None:
+        self.sender = sender
+        self.content = content
+        self.style = style
+
+class StateTransitionMessage:
+    def __init__(self, state_name: str, retry_count: int = 0) -> None:
+        self.state_name = state_name
+        self.retry_count = retry_count
+
+class EditorMessage:
+    def __init__(self, command: str, completion_event: threading.Event) -> None:
+        self.command = command
+        self.completion_event = completion_event
+
+class PromptUserMessage:
+    def __init__(self, proposal: str, response_event: threading.Event, response_container: Dict[str, bool]) -> None:
+        self.proposal = proposal
+        self.response_event = response_event
+        self.response_container = response_container
+
+class AriadneApp:
+    """
+    A professional, Aider-style interface using prompt-toolkit and rich.
+    Now a pure consumer of EngineEvents.
+    """
+    def __init__(self, **kwargs):
+        self.session = PromptSession()
+        self.kb = KeyBindings()
+        self.start_callback: Optional[Callable[[Dict[str, Any]], None]] = None
+        self.engine_running = False
+        self.current_context = None # Set by engine.py
+        
+        # State tracking for display
+        self.current_state = "IDLE"
+        self.retry_count = 0
+        self.active_intent = "None"
+        self.targets: List[str] = []
+        self.last_test_status: Optional[bool] = None
+
+        # Setup custom styles for prompt-toolkit
+        self.style = Style.from_dict({
+            'prompt': '#7aa2f7 bold',
+            'arrow': '#bb9af7',
+        })
+
+    def call_from_thread(self, func: Callable, *args, **kwargs):
+        """Compatibility method for background threads."""
+        func(*args, **kwargs)
+
+    def post_message(self, event: Union[AriadneEvent, Any]) -> None:
+        """
+        Routes incoming engine events to the appropriate UI handlers.
+        """
+        if not isinstance(event, AriadneEvent):
+            # Compatibility for legacy direct calls if any remain
+            return
+
+        etype = event.type
+        payload = event.payload
+
+        if etype == "STATE_CHANGE":
+            self.on_state_transition(payload)
+        elif etype == "LLM_STREAM":
+            # This is handled live by QueryLLM primitive using Live() 
+            # but we can also log it here if we want persistent chat history
+            pass
+        elif etype == "USER_PROMPT":
+            self.on_user_prompt(payload)
+        elif etype == "EDITOR_OPEN":
+            self.on_editor_open(payload)
+        elif etype == "PLAN_UPDATE":
+            self.update_plan(payload)
+        elif etype == "SURGEON_UPDATE":
+            self.update_surgeon(payload["symbol"], payload["code"], payload.get("edits"))
+        elif etype == "INTENT_UPDATE":
+            self.active_intent = payload["intent"]
+
+    def run(self) -> None:
+        """
+        Main interactive loop using prompt-toolkit.
+        """
+        # Setup logging redirection
+        handler = TextualLogHandler(self)
+        logging.getLogger("ariadne").addHandler(handler)
+        
+        # Capture stdout/stderr with patch_stdout to not break the prompt
+        redirector = RedirectOutput(self)
+        sys.stdout = sys.stderr = redirector
+
+        self.print_system_msg("Ariadne Engine Initialized. Type '/help' for commands.")
+        
+        with patch_stdout():
+            while True:
+                try:
+                    # vi_mode=True enables Neovim-style navigation in the prompt
+                    user_input = self.session.prompt(
+                        "\n> ", 
+                        vi_mode=True, 
+                        style=self.style
+                    ).strip()
+                    
+                    if not user_input:
+                        continue
+                        
+                    if user_input.startswith("/"):
+                        self.handle_command(user_input)
+                        continue
+
+                    if self.current_prompt_event:
+                        # We are waiting for a user approval mid-engine
+                        if user_input.lower() in ["y", "yes", "approve"]:
+                            self.resolve_prompt(True)
+                        elif user_input.lower() in ["n", "no", "reject"]:
+                            self.resolve_prompt(False)
+                        else:
+                            self.print_system_msg("[bold red]Please reply with 'yes' or 'no' to approve the proposal.[/]")
+                        continue
+
+                    # Otherwise, it's a new intent
+                    if not self.engine_running and self.start_callback:
+                        self.engine_running = True
+                        self.active_intent = user_input
+                        self.print_ariadne_msg(f"Starting objective: {user_input}")
+                        
+                        threading.Thread(
+                            target=self.start_callback, 
+                            args=({"intent": user_input, "targets": self.targets},), 
+                            daemon=True
+                        ).start()
+                    else:
+                        self.print_system_msg("[yellow]Engine is already running. Please wait or use /stop (not yet implemented).[/]")
+
+                except KeyboardInterrupt:
+                    continue
+                except EOFError:
+                    self.print_system_msg("Shutting down...")
+                    break
+                except Exception as e:
+                    self.print_system_msg(f"[bold red]Error in prompt: {e}[/]")
+
+    def handle_command(self, cmd_text: str) -> None:
+        parts = cmd_text.split()
+        cmd = parts[0].lower()
+        args = parts[1:]
+
+        if cmd == "/exit":
+            sys.exit(0)
+        elif cmd == "/add":
+            self.targets.extend(args)
+            self.print_system_msg(f"Added targets: [cyan]{', '.join(args)}[/]")
+        elif cmd == "/drop":
+            self.targets = [t for t in self.targets if t not in args]
+            self.print_system_msg(f"Dropped targets: [red]{', '.join(args)}[/]")
+        elif cmd == "/clear":
+            self.targets = []
+            self.print_system_msg("Target list cleared.")
+        elif cmd == "/stop":
+            if self.engine_running:
+                if hasattr(self, "current_context"):
+                    self.current_context.stop_requested = True
+                self.abort_event.set()
+                self.print_system_msg("Stop request sent to engine and LLM...")
+            else:
+                self.print_system_msg("No engine is currently running.")
+        elif cmd == "/test":
+            self.print_system_msg("Manual test execution not yet implemented via command.")
+        elif cmd == "/splat":
+            splat_file = "C:/Users/jamie/projects/Godot/TexelSplatting/.rust/src/realtime_probe.rs"
+            if not os.path.exists(splat_file):
+                self.print_system_msg(f"[bold red]Splat file not found: {splat_file}[/]")
+                return
+            
+            self.targets = [splat_file]
+            intent = "Implement get_total_cameras method in RealtimeProbe. It should return self.cameras.len() as i32."
+            self.active_intent = intent
+            self.print_ariadne_msg(f"Running Splat Test: {intent}")
+            
+            if not self.engine_running and self.start_callback:
+                self.engine_running = True
+                threading.Thread(
+                    target=self.start_callback, 
+                    args=({"intent": intent, "targets": self.targets},), 
+                    daemon=True
+                ).start()
+        elif cmd == "/ls":
+            self.print_system_msg(f"Current targets: [cyan]{', '.join(self.targets) if self.targets else 'None'}[/]")
+            self.print_system_msg(f"Active goal: [white]{self.active_intent}[/]")
+        elif cmd == "/help":
+            table = Table(title="[bold blue]Ariadne Commands[/]", show_header=True, header_style="bold magenta", border_style="cyan", box=None)
+            table.add_column("Command", style="bold cyan", width=20)
+            table.add_column("Description", style="white")
+            
+            table.add_row("/add <files>", "Add files to the surgical session")
+            table.add_row("/drop <files>", "Remove files from the session")
+            table.add_row("/clear", "Clear all targets")
+            table.add_row("/ls", "List current targets and active goal")
+            table.add_row("/stop", "Abort the current engine run")
+            table.add_row("/exit", "Exit Ariadne")
+            
+            console.print(table)
+            self.print_system_msg("Or simply type your coding objective to start the engine.")
+        else:
+            self.print_system_msg(f"[bold red]Unknown command: {cmd}[/]")
+
+    def print_ariadne_msg(self, text: str, role: str = "Ariadne"):
+        md = Markdown(text)
+        panel = Panel(md, title=f"[bold blue]{role}[/bold blue]", border_style="blue", expand=False)
+        console.print(panel)
+
+    def print_system_msg(self, msg: str):
+        console.print(f"[bold yellow]⚙️ {msg}[/bold yellow]")
+
+    def on_engine_log_message(self, message: EngineLogMessage) -> None:
+        msg = message.record.getMessage()
+        if message.record.levelno >= logging.WARNING:
+            color = "red" if message.record.levelno >= logging.ERROR else "yellow"
+            console.print(f"[bold {color}] {msg}[/]")
+        else:
+            # Progress updates
+            console.print(f"[dim] {msg}[/]")
+
+    def on_stdout_message(self, message: StdoutMessage) -> None:
+        content = message.text.strip()
+        if content:
+             console.print(f"[italic dim] {content}[/]")
+
+    def on_chat_update_message(self, message: ChatUpdateMessage) -> None:
+        self.print_ariadne_msg(message.content, role=message.sender)
+
+    def on_state_transition(self, payload: Dict[str, Any]) -> None:
+        self.current_state = payload["state"]
+        
+        console.print(f"[dim] Transitioning to [bold magenta]{self.current_state}[/][/]")
+        
+        if self.current_state == "FINISH":
+            self.engine_running = False
+            self.print_system_msg("[bold green]Success! Task completed.[/]")
+
+    def on_user_prompt(self, payload: Dict[str, Any]) -> None:
+        # TUI is now in a mode where next input resolves this prompt
+        self.user_prompt_active = True
+        proposal = payload["proposal"]
+        proposal_text = f"**USER INTERVENTION REQUIRED**\n\n{proposal}\n\nDo you approve this? (yes/no)"
+        self.print_ariadne_msg(proposal_text)
+
+    def resolve_prompt(self, approved: bool) -> None:
+        if self.current_context:
+            self.user_prompt_active = False
+            self.current_context.submit_user_response({"approved": approved})
+            self.print_system_msg("Response submitted. Continuing..." if approved else "Rejected.")
+
+    def on_editor_open(self, payload: Dict[str, Any]) -> None:
+        command = payload["command"]
+        self.print_system_msg(f"Launching external editor: [cyan]{command}[/]")
+        try:
+            subprocess.run(shlex.split(command))
+        except Exception as e:
+            logging.error(f"Failed to run editor: {e}")
+        self.print_system_msg("Editor closed. Resuming...")
+
+    # Compatibility methods for engine.py
+    def update_intent(self, intent: str) -> None:
+        self.active_intent = intent
+
+    def update_plan(self, data: Dict[str, Any]) -> None:
+        text = f"**ARCHITECT REASONING**\n{data.get('reasoning', '')}\n\n**SENSING STEPS**\n"
+        for i, s in enumerate(data.get("steps", [])):
+            text += f"{i+1}. {s.get('symbol', 'unknown')}\n"
+        self.print_ariadne_msg(text, role="Architect")
+
+    def update_surgeon(self, symbol: str, code: str, edits: List[Dict[str, Any]] = None) -> None:
+        text = f"**SURGEON: OPERATING ON {symbol}**\n\n**Target Code:**\n```\n{code}\n```\n"
+        if edits:
+            text += "\n**Queued Edits:**\n"
+            for i, e in enumerate(edits):
+                # Handle both legacy and new edit formats
+                new_code = e.get("new_code", e.get("replace_text", ""))
+                text += f"{i+1}. [italic]Replacement applied ({len(new_code)} bytes)[/]\n"
+        self.print_ariadne_msg(text, role="Surgeon")
+
+    def update_history(self, history: List[str]) -> None:
+        text = "**REPAIR HISTORY**\n"
+        for i, entry in enumerate(history):
+            text += f"{i+1}. {entry}\n"
+        self.print_ariadne_msg(text, role="History")
+
+    def update_files(self, files: List[str]) -> None:
+        self.targets.extend(files)
+
+    def update_test_status(self, success: bool, output: str) -> None:
+        self.last_test_status = success
+        status_str = "[bold green]PASSED[/]" if success else "[bold red]FAILED[/]"
+        console.print(f" [bold]TEST STATUS:[/] {status_str}")
+
+if __name__ == "__main__":
+    AriadneApp().run()

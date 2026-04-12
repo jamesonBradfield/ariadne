@@ -1,571 +1,983 @@
 import logging
-from typing import Any, Tuple, Dict, List
-from .core import State
-from .payloads import JobPayload
-from .primitives import ExtractAST, QueryLLM, ExecuteCommand, PromptUser, WriteFile, BlockSplice
-from .components import TreeSitterSensor, SyntaxGate
+import os
+import re
+import json
+from typing import Any, Tuple, Dict, List, Optional, Union
+from .core import State, EngineContext
+from .payloads import (
+    JobPayload,
+    DispatchResponse,
+    ThinkingResponse,
+    MapsNavResponse,
+    MapsThinkResponse,
+    MapsSurgeonResponse,
+    FileExplorerResponse,
+    SpawnResponse,
+    SelfOptimizationResponse,
+)
+from .primitives import (
+    ExtractAST,
+    QueryLLM,
+    ExecuteCommand,
+    PromptUser,
+    WriteFile,
+    ASTSplice,
+    BlockSplice,
+    QueryMCP,
+    QueryAstGrep,
+)
+from .components import TreeSitterSensor
 
-logger = logging.getLogger("ariadne.parent_states")
+logger = logging.getLogger("ariadne.states")
 
-class TRIAGE(State):
-    """
-    Initializes ContextPayload and determines user intent.
-    """
-    def __init__(self, config_manager: Any):
-        super().__init__("TRIAGE")
-        self.config_manager = config_manager
-        self.config = config_manager.get_model_info("TRIAGE")
-        self.query_llm = QueryLLM(model=self.config.get("model"), api_base=self.config.get("api_base"))
 
-    def tick(self, payload: Any) -> Tuple[str, Any]:
-        # Support both raw string and dict-based payload for flexibility
-        if isinstance(payload, dict):
-            raw_input = payload.get("input", "")
-            # If intent is already there (e.g. from CLI flag), don't re-triage
-            if payload.get("intent"):
-                return "DISPATCH", payload
-        else:
-            raw_input = payload
-            
-        variables = {"input": raw_input}
-        system_prompt = self.config_manager.render_prompt(self.config.get("system_prompt", ""), variables)
-        user_prompt = self.config_manager.render_prompt(self.config.get("user_prompt_template", ""), variables)
+def record_interaction(
+    context: EngineContext, state: str, system: str, user: str, response: Any
+):
+    """Logs an LLM interaction to the job history for self-optimization."""
+    from .payloads import InteractionTrace
 
-        status, intent = self.query_llm.tick({
-            "system": system_prompt,
-            "user": user_prompt,
-            "params": self.config.get("params", {}),
-            "post_process": self.config.get("post_process")
-        })
-        
-        if status != "SUCCESS":
-            return "ERROR", intent
-            
-        if isinstance(payload, dict):
-            payload["intent"] = intent
-            return "DISPATCH", payload
-            
-        return "DISPATCH", intent
+    # If response is a Pydantic model, dump it to JSON string
+    resp_str = ""
+    if hasattr(response, "model_dump_json"):
+        resp_str = response.model_dump_json()
+    else:
+        resp_str = str(response)
+
+    trace = InteractionTrace(
+        state=state, system_prompt=system, user_prompt=user, response=resp_str
+    )
+    context.interaction_history.append(trace)
+
 
 class DISPATCH(State):
     """
-    Creates JobPayload, generates a test, and gets user approval.
+    Generates a test contract based on the language profile and skeletons.
     """
-    def __init__(self, config_manager: Any, test_filepath: str, profile: Any, target_files: List[str] = None):
+
+    def __init__(
+        self, config_manager, test_filepath: str, profile, target_files: List[str]
+    ):
         super().__init__("DISPATCH")
         self.config_manager = config_manager
-        self.config = config_manager.get_model_info("DISPATCH")
         self.test_filepath = test_filepath
-        self.target_files = target_files or []
         self.profile = profile
-        self.extractor = ExtractAST(profile.get_language_ptr())
-        self.skeleton_query = profile.get_skeleton_query()
-        self.query_llm = QueryLLM(model=self.config.get("model"), api_base=self.config.get("api_base"))
+        self.target_files = target_files
         self.prompt_user = PromptUser()
-        self.write_file = WriteFile()
 
-    def tick(self, payload: Any) -> Tuple[str, JobPayload]:
-        if isinstance(payload, dict):
-            intent = payload.get("intent", "")
-            t_files = list(set(self.target_files + payload.get("target_files", [])))
-        else:
-            intent = payload
-            t_files = self.target_files
-            
-        job = JobPayload(intent=intent, target_files=t_files)
-        
-        # 1. Get Skeleton for context
-        all_skeletons = []
-        for filepath in t_files:
-            status, skeletons = self.extractor.tick({
-                "filepath": filepath,
-                "query_string": self.skeleton_query,
-                "capture_name": self.profile.skeleton_capture_name
-            })
-            all_skeletons.extend(skeletons)
-        
-        skeleton_context = "\n".join(all_skeletons)
-        
-        # 2. Generate Test
-        variables = {
-            "language": self.profile.name,
-            "intent": intent,
-            "skeleton_context": skeleton_context
-        }
-        system_prompt = self.config_manager.render_prompt(self.config.get("system_prompt", ""), variables)
-        user_prompt = self.config_manager.render_prompt(self.config.get("user_prompt_template", ""), variables)
-        
-        status, test_code = self.query_llm.tick({
-            "system": system_prompt,
-            "user": user_prompt,
-            "params": self.config.get("params", {}),
-            "post_process": self.config.get("post_process")
-        })
-        
-        # 3. Prompt for Approval
-        p_status, approved = self.prompt_user.tick(f"Proposed Test:\n{test_code}")
-        
+    def tick(self, job: JobPayload, context: EngineContext) -> Tuple[str, JobPayload]:
+        logger.info(f"Generating test contract for {self.profile.name}...")
+
+        skeletons = []
+        for f in self.target_files:
+            if not os.path.exists(f):
+                continue
+            status, result = self.profile.get_skeleton(f)
+            if status == "SUCCESS":
+                skeletons.append(f"File: {f}\n{result}")
+            else:
+                try:
+                    with open(f, "r", encoding="utf-8") as src:
+                        skeletons.append(f"File: {f} (Full Source)\n{src.read()}")
+                except Exception:
+                    pass
+
+        skeleton_context = "\n\n".join(skeletons)
+
+        model_info = self.config_manager.get_model_info("DISPATCH")
+        state_config = self.config_manager.config["states"]["DISPATCH"]
+
+        system_prompt = self.config_manager.render_prompt(
+            state_config["system_prompt"], {"language": self.profile.name}
+        )
+        user_prompt = self.config_manager.render_prompt(
+            state_config["user_prompt_template"],
+            {
+                "intent": context.intent,
+                "skeleton_context": skeleton_context,
+                "language": self.profile.name,
+            },
+        )
+
+        query = QueryLLM(
+            model=model_info.get("model"), api_base=model_info.get("api_base")
+        )
+        status, result = query.tick(
+            {
+                "system": system_prompt,
+                "user": user_prompt,
+                "params": model_info.get("params", {}),
+                "response_model": DispatchResponse,
+            },
+            context,
+        )
+
+        if status != "SUCCESS":
+            return "ABORT", job
+
+        test_code = result.test_code
+
+        # Inject standard headers
+        standard_headers = self.profile.get_standard_headers()
+        if standard_headers and standard_headers not in test_code:
+            test_code = f"{standard_headers}\n{test_code}"
+
+        record_interaction(context, "DISPATCH", system_prompt, user_prompt, result)
+
+        proposal = f"Proposed Test Code ({self.test_filepath}):\n\n{test_code}"
+        status, approved = self.prompt_user.tick(proposal, context)
+
         if not approved:
-            return "HALT", job
-            
-        # 4. Save Test
-        self.write_file.tick({"filepath": self.test_filepath, "content": test_code})
-        job.read_only_tests.append(self.test_filepath)
-        
+            logger.warning("User rejected the test contract. Aborting.")
+            return "ABORT", job
+
+        writer = WriteFile()
+        writer.tick({"filepath": self.test_filepath, "content": test_code}, context)
+
+        job.test_code = test_code
         return "EVALUATE", job
+
 
 class EVALUATE(State):
     """
-    Runs tests and routes based on pass/fail.
+    Executes tests and captures output.
     """
-    def __init__(self, test_command: str = "cargo test"):
+
+    def __init__(self, test_command: str):
         super().__init__("EVALUATE")
         self.test_command = test_command
-        self.executor = ExecuteCommand()
 
-    def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
-        if job.retry_count > 3:
-            logger.error("Circuit breaker triggered: Too many retries.")
-            return "ABORT", job
-            
-        status, output = self.executor.tick(self.test_command)
-        
+    def _parse_failure(self, output: str) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Parses compiler/runtime output for file and line number.
+        """
+        # Rust compiler errors
+        rust_comp = re.search(r"-->\s*(.+?):(\d+):(\d+)", output)
+        if rust_comp:
+            return rust_comp.group(1), rust_comp.group(2)
+
+        # Rust panics
+        rust_panic = re.search(r"panicked at .*?([^ ]+\.rs):(\d+):(\d+)", output)
+        if rust_panic:
+            return rust_panic.group(1), rust_panic.group(2)
+
+        # Python tracebacks
+        py_trace = re.search(r'File "(.+?)", line (\d+)', output)
+        if py_trace:
+            return py_trace.group(1), py_trace.group(2)
+
+        return None, None
+
+    def tick(self, job: JobPayload, context: EngineContext) -> Tuple[str, JobPayload]:
+        logger.info(f"Executing test suite: {self.test_command}")
+
+        executor = ExecuteCommand()
+        status, output = executor.tick(self.test_command, context)
+
+        # Truncate output to prevent context overflow in subsequent LLM states
+        if len(output) > 5000:
+            logger.info(f"Truncating test output (original length: {len(output)})")
+            output = output[:2500] + "\n... [TRUNCATED] ...\n" + output[-2500:]
+
+        job.test_stdout = output
+
         if status == "SUCCESS":
-            logger.info("Tests passed!")
+            logger.info("Tests PASSED! Goal achieved.")
             return "SUCCESS", job
         else:
-            logger.warning("Tests failed. Transitioning to THINKING.")
-            job.test_stdout = output
-            job.retry_count += 1
+            logger.warning("Tests FAILED. Analyzing output...")
+
+            failing_file, failing_line = self._parse_failure(output)
+            if failing_file and failing_line:
+                logger.info(
+                    f"Detected failure location at {failing_file}:{failing_line}. Hints added to payload."
+                )
+                job.failing_file = failing_file
+                job.failing_line = failing_line
+
             return "THINKING", job
+
+
+class INTERVENE(State):
+    """
+    Human-in-the-loop state for manual intervention via an external editor.
+    """
+
+    def __init__(self, config_manager):
+        super().__init__("INTERVENE")
+        self.config_manager = config_manager
+
+    def tick(
+        self, payload: Union[JobPayload, Dict[str, Any]], context: EngineContext
+    ) -> Tuple[str, JobPayload]:
+        # Normalize to JobPayload if it's a dict (initial state scenario)
+        if isinstance(payload, dict):
+            job = JobPayload(
+                intent=payload.get("intent", ""),
+                target_files=payload.get("target_files", []),
+                needs_elaboration=payload.get("needs_elaboration", False),
+                next_headless_state=payload.get("next_headless_state", "MAPS_NAV"),
+            )
+        else:
+            job = payload
+
+        editor_cfg = self.config_manager.config.get("editor", {})
+        headless = editor_cfg.get("headless", False)
+        rpc_template = editor_cfg.get("rpc_command_template")
+
+        if headless and not rpc_template:
+            logger.warning(
+                "Headless mode active but no rpc_command_template provided. Skipping intervention."
+            )
+            return job.next_headless_state, job
+
+        command_template = (
+            rpc_template
+            if headless
+            else editor_cfg.get("command_template", "nvim +{line} {file}")
+        )
+
+        auto_accept = os.getenv("ARIADNE_AUTO_ACCEPT") == "true"
+
+        # Scenario A: Intent Elaboration
+        if job.needs_elaboration:
+            if auto_accept:
+                logger.info("Auto-accepting intent elaboration.")
+                job.needs_elaboration = False
+                return "THINKING", job
+
+            original_intent = context.intent
+            with tempfile.NamedTemporaryFile(
+                suffix=".md", mode="w", encoding="utf-8", delete=False
+            ) as tf:
+                tf.write("# Ariadne Intent Elaboration\n")
+                tf.write("Edit the text below to refine your coding objective.\n")
+                tf.write("Save and exit your editor to continue execution.\n")
+                tf.write(
+                    "────────────────────────────────────────────────────────────────────────\n\n"
+                )
+                tf.write(original_intent)
+                temp_path = tf.name
+
+            cmd = command_template.format(line=5, file=temp_path)
+
+            if headless:
+                # Emit event instead of direct subprocess if possible, or just emit and wait
+                context.emit("EDITOR_OPEN", {"command": cmd, "file": temp_path})
+                context.emit(
+                    "USER_PROMPT",
+                    {
+                        "proposal": f"Please edit the intent file: {temp_path}\nPress 'yes' when done."
+                    },
+                )
+                context.wait_for_user()
+            else:
+                context.emit(
+                    "EDITOR_OPEN", {"command": cmd, "file": temp_path, "blocking": True}
+                )
+
+            with open(temp_path, "r", encoding="utf-8") as f:
+                content = f.read()
+                parts = content.split(
+                    "────────────────────────────────────────────────────────────────────────",
+                    1,
+                )
+                new_intent = parts[-1].strip() if len(parts) > 1 else content.strip()
+
+            os.unlink(temp_path)
+
+            context.intent = new_intent if new_intent else original_intent
+            job.needs_elaboration = False
+
+            return "THINKING", job
+
+        # Scenario B: Manual Fix Intervention
+        if job.failing_file:
+            if auto_accept:
+                logger.info(
+                    f"Auto-accepting manual fix for {job.failing_file}. Skipping editor."
+                )
+                job.failing_file = None
+                job.failing_line = None
+                return "EVALUATE", job
+
+            line = job.failing_line or "1"
+            cmd = command_template.format(line=line, file=job.failing_file)
+
+            context.emit("EDITOR_OPEN", {"command": cmd, "file": job.failing_file})
+            context.emit(
+                "USER_PROMPT",
+                {
+                    "proposal": f"File opened in your editor: {job.failing_file}\nPress 'yes' when you are done making changes."
+                },
+            )
+            context.wait_for_user()
+
+            job.failing_file = None
+            job.failing_line = None
+
+            return "EVALUATE", job
+
+        return "MAPS_NAV", job
+
 
 class THINKING(State):
     """
-    Strategic Architect: Analyzes errors and creates a high-level repair plan.
+    Architect state. Analyzes failures and creates a logical repair plan.
     """
-    def __init__(self, config_manager: Any, profile: Any):
+
+    def __init__(self, config_manager, profile):
         super().__init__("THINKING")
         self.config_manager = config_manager
         self.profile = profile
-        self.config = config_manager.get_model_info("THINKING")
-        self.query_llm = QueryLLM(model=self.config.get("model"), api_base=self.config.get("api_base"))
-        self.extractor = ExtractAST(profile.get_language_ptr())
 
-    def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
-        # 1. Gather context from target files
-        all_skeletons = []
-        available_symbols = []
-        
-        for filepath in job.target_files:
-            status, skeletons = self.extractor.tick({
-                "filepath": filepath,
-                "query_string": self.profile.get_skeleton_query(),
-                "capture_name": self.profile.skeleton_capture_name
-            })
-            for s in skeletons:
-                import re
-                # Improved regex to handle optional visibility and various item types
-                name_match = re.search(r"(?:pub\s+)?(?:fn|struct|class|impl|enum|trait)\s+(\w+)", s)
-                if name_match:
-                    available_symbols.append(name_match.group(1))
-                all_skeletons.append(f"--- Symbol Definition ---\n{s}")
-        
-        # Read the test content that failed
-        test_content = "Unknown"
-        if job.read_only_tests:
-            try:
-                with open(job.read_only_tests[0], "r") as f:
-                    test_content = f.read()
-            except Exception:
-                pass
+    def tick(self, job: JobPayload, context: EngineContext) -> Tuple[str, JobPayload]:
+        logger.info("Architecting repair plan...")
 
-        # 2. Get available symbols for the architect
-        # Aggressively truncate errors and skeletons to keep local server happy
-        variables = {
-            "intent": job.intent,
-            "test_code": test_content[:1000],
-            "test_stdout": job.test_stdout[:1000] + "... [TRUNCATED]" if len(job.test_stdout) > 1000 else job.test_stdout,
-            "retry_count": job.retry_count,
-            "available_symbols": ", ".join(set(available_symbols)),
-            "skeletons": "\n".join([s.split("{")[0].strip() for s in all_skeletons])[:1000], # Just signatures
-            "plan_history": "\n".join([f"- {p}" for p in job.plan_history]) if job.plan_history else "None"
-        }
-        
-        system_prompt = self.config_manager.render_prompt(self.config.get("system_prompt", ""), variables)
-        user_prompt = self.config_manager.render_prompt(self.config.get("user_prompt_template", ""), variables)
+        skeletons = []
+        for f in context.target_files:
+            if not os.path.exists(f):
+                continue
+            status, result = self.profile.get_skeleton(f)
+            if status == "SUCCESS":
+                skeletons.append(f"File: {f}\n{result}")
+            else:
+                try:
+                    with open(f, "r", encoding="utf-8") as src:
+                        skeletons.append(f"File: {f} (Full Source)\n{src.read()}")
+                except Exception:
+                    pass
 
-        status, plan = self.query_llm.tick({
-            "system": system_prompt,
-            "user": user_prompt,
-            "params": self.config.get("params", {}),
-            "post_process": "extract_json"
-        })
+        skeleton_context = "\n\n".join(skeletons)
+        symbols = self.profile.get_available_symbols(context.target_files, context)
 
-        if status == "SUCCESS" and isinstance(plan, dict):
-            job.plan = plan
-            reasoning = plan.get('reasoning', 'No reasoning provided')
-            job.plan_history.append(reasoning) # Track history
-            logger.info(f"[{self.name}] Generated Plan: {reasoning}")
-            return "ROUTER", job
-        
-        logger.error(f"[{self.name}] Failed to generate logical plan. Status: {status}, Plan Type: {type(plan)}")
+        model_info = self.config_manager.get_model_info("THINKING")
+        state_config = self.config_manager.config["states"]["THINKING"]
+
+        user_prompt = self.config_manager.render_prompt(
+            state_config["user_prompt_template"],
+            {
+                "intent": context.intent,
+                "test_code": job.test_code,
+                "test_stdout": job.test_stdout,
+                "available_symbols": json.dumps(symbols),
+                "skeletons": skeleton_context,
+            },
+        )
+
+        query = QueryLLM(
+            model=model_info.get("model"), api_base=model_info.get("api_base")
+        )
+        status, plan = query.tick(
+            {
+                "system": state_config["system_prompt"],
+                "user": user_prompt,
+                "params": model_info.get("params", {}),
+                "response_model": ThinkingResponse,
+            },
+            context,
+        )
+
+        record_interaction(
+            context, "THINKING", state_config["system_prompt"], user_prompt, plan
+        )
+
         if status != "SUCCESS":
-             logger.error(f"[{self.name}] LLM Error Details: {plan}")
-        else:
-             logger.error(f"[{self.name}] Non-dict plan received. Raw content (truncated): {str(plan)[:500]}")
-             
-        return "ABORT", job
+            return "ABORT", job
 
-class ROUTER(State):
-    """
-    Orchestrator: Decides the next state dynamically based on context, errors, and plans.
-    """
-    def __init__(self, config_manager: Any):
-        super().__init__("ROUTER")
-        self.config_manager = config_manager
-        self.config = config_manager.get_model_info("ROUTER")
-        self.query_llm = QueryLLM(model=self.config.get("model"), api_base=self.config.get("api_base"))
-        self.valid_transitions = ["SEARCH", "DISPATCH", "MAPS", "THINKING", "ABORT"]
+        job.plan = plan
+        job.plan_history.append(plan.reasoning)
 
-    def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
-        # Read the test content that failed
-        test_content = "Unknown"
-        if job.read_only_tests:
-            try:
-                with open(job.read_only_tests[0], "r") as f:
-                    test_content = f.read()
-            except Exception:
-                pass
+        # LSP Reference Search: Find all references for each step's symbol
+        lsp_service = context.services.lsp
+        if lsp_service and lsp_service.is_running():
+            for step in plan.steps:
+                try:
+                    # Get references for the symbol
+                    references = []
+                    for filepath in context.target_files:
+                        if not os.path.exists(filepath):
+                            continue
+                        try:
+                            refs = lsp_service.find_references(filepath, step.symbol)
+                            if refs:
+                                references.extend(refs)
+                        except Exception:
+                            pass
+                    step.references = references
+                except Exception:
+                    pass
 
-        import json
-        variables = {
-            "intent": job.intent,
-            "retry_count": job.retry_count,
-            "test_stdout": job.test_stdout[:1000] + "... [TRUNCATED]" if len(job.test_stdout) > 1000 else job.test_stdout,
-            "llm_feedback": job.llm_feedback,
-            "plan": json.dumps(job.plan)
+        job.maps_state = {
+            "current_step_index": 0,
+            "steps": [step.model_dump() for step in plan.steps],
         }
-        
-        system_prompt = self.config_manager.render_prompt(self.config.get("system_prompt", ""), variables)
-        user_prompt = self.config_manager.render_prompt(self.config.get("user_prompt_template", ""), variables)
 
-        status, response = self.query_llm.tick({
-            "system": system_prompt,
-            "user": user_prompt,
-            "params": self.config.get("params", {}),
-            "post_process": "extract_json"
-        })
+        return "MAPS_NAV", job
 
-        if status == "SUCCESS" and isinstance(response, dict):
-            next_state = response.get("next_state", "").upper()
-            reasoning = response.get("reasoning", "No reasoning provided")
-            logger.info(f"[{self.name}] Decision: {next_state} | Reasoning: {reasoning}")
-            
-            if next_state in self.valid_transitions:
-                # Clear transient feedback before transitioning
-                job.llm_feedback = ""
-                return next_state, job
-            else:
-                logger.error(f"[{self.name}] Invalid next_state requested: {next_state}. Defaulting to ABORT.")
-                return "ABORT", job
 
-        logger.error(f"[{self.name}] Failed to get routing decision. Status: {status}")
-        return "ABORT", job
+def get_lsp_manager(config_manager, job=None):
+    if job and hasattr(job, "lsp_service"):
+        return job.lsp_service
 
-class SEARCH(State):
+    if not hasattr(config_manager, "_lsp_service"):
+        from .services import LSPService
+
+        config_manager._lsp_service = LSPService()
+
+    return config_manager._lsp_service
+
+
+class MAPS_NAV(State):
     """
-    Coordinator: Uses the Logical Plan to acquire exact code coordinates.
+    1st Phase: Pure navigation. Locks onto the exact node ID.
     """
-    def __init__(self, config_manager: Any, profile: Any):
-        super().__init__("SEARCH")
+
+    def __init__(self, config_manager, profile):
+        super().__init__("MAPS_NAV")
         self.config_manager = config_manager
         self.profile = profile
-        self.extractor = ExtractAST(profile.get_language_ptr())
 
-    def tick(self, job: JobPayload) -> Tuple[str, JobPayload]:
-        # If we have a plan, use it deterministically
-        if job.plan and "steps" in job.plan:
-            job.target_symbols = [step["symbol"] for step in job.plan["steps"] if "symbol" in step]
-            job.current_file_index = 0
-            logger.info(f"[{self.name}] Plan-driven symbols: {job.target_symbols}")
-            return "SENSE", job
-            
-        logger.error(f"[{self.name}] No plan found to guide search. Aborting.")
-        return "ABORT", job
+    def tick(self, job: JobPayload, context: EngineContext) -> Tuple[str, JobPayload]:
+        if hasattr(job, "tracked_nodes") and job.tracked_nodes:
+            return "MAPS_THINK", job
 
-class SENSE(State):
-    """
-    Acquires the exact AST coordinates for target symbols.
-    """
-    def __init__(self, profile):
-        super().__init__("SENSE")
-        self.profile = profile
-        self.sensor = TreeSitterSensor(profile.get_language_ptr())
+        if not hasattr(job, "tracked_nodes"):
+            job.tracked_nodes = []
 
-    def tick(self, job: JobPayload) -> Tuple[str, Any]:
-        if job.current_file_index >= len(job.target_files):
-            logger.error(f"[{self.name}] Exhausted all files without finding any target symbols.")
-            return "ABORT", job
+        idx = job.maps_state.get("current_step_index", 0)
+        steps = job.maps_state.get("steps", [])
 
-        filepath = job.target_files[job.current_file_index]
-        job.extracted_nodes = []
-
-        if not job.target_symbols:
-            logger.error(f"[{self.name}] No target symbols provided. Aborting.")
-            return "ABORT", job
-
-        for symbol in job.target_symbols:
-            query = self.profile.get_query(symbol)
-            node_data = self.sensor.extract_node(filepath, query, self.profile.target_capture_name)
-
-            if node_data:
-                node_data["symbol"] = symbol
-                job.extracted_nodes.append(node_data)
-                logger.info(f"[{self.name}] Target acquired in {filepath}: {symbol}")
+        if idx >= len(steps):
+            if job.tracked_nodes:
+                return "MAPS_THINK", job
             else:
-                logger.warning(f"[{self.name}] Symbol not found in {filepath}: {symbol}")
+                return "FINISH", job
 
-        if not job.extracted_nodes:
-            job.current_file_index += 1
-            return "SENSE", job
+        current_step = steps[idx]
+        symbol = current_step["symbol"]
 
-        return "MAPS", job
+        found_nodes = []
+        for filepath in context.target_files:
+            if not os.path.exists(filepath):
+                continue
+            try:
+                status, nodes = self.profile.find_symbol(filepath, symbol, context)
+                if status == "SUCCESS" and nodes:
+                    found_nodes.extend(nodes)
+            except Exception as e:
+                logger.error(f"Error finding symbol {symbol} in {filepath}: {e}")
+                continue
 
-class MAPS(State):
+        if not found_nodes:
+            logger.warning(f"Could not find symbol {symbol}. Skipping to next step.")
+            job.maps_state["current_step_index"] += 1
+            return "MAPS_NAV", job
+
+        for node in found_nodes:
+            job.tracked_nodes.append(
+                {
+                    "filepath": context.target_files[0],
+                    "symbol": symbol,
+                    "node_string": node["code"],
+                    "start_byte": node["start_byte"],
+                    "end_byte": node["end_byte"],
+                    "node_type": node.get("node_type", node.get("type", "unknown")),
+                }
+            )
+
+        job.maps_state["current_step_index"] += 1
+        if "navigation_stack" in job.maps_state:
+            del job.maps_state["navigation_stack"]
+
+        return "MAPS_NAV", job
+
+
+class MAPS_THINK(State):
     """
-    Micro AST Procedural Surgeon: Executes SEARCH/REPLACE on the target node.
+    2nd Phase: Diagnosis and drafting. Plain-text markdown focus.
     """
-    def __init__(self, config_manager: Any, profile: Any):
-        super().__init__("MAPS")
+
+    def __init__(self, config_manager, profile):
+        super().__init__("MAPS_THINK")
         self.config_manager = config_manager
-        self.config = config_manager.get_model_info("MAPS")
-        self.llm = QueryLLM(model=self.config.get("model"), api_base=self.config.get("api_base"))
         self.profile = profile
 
-    def tick(self, job: JobPayload) -> Tuple[str, Any]:
-        if not job.extracted_nodes:
-            return "SENSE", job
+    def tick(self, job: JobPayload, context: EngineContext) -> Tuple[str, JobPayload]:
+        if not hasattr(job, "tracked_nodes") or not job.tracked_nodes:
+            return "MAPS_NAV", job
 
-        if not hasattr(job, "maps_state"):
-            job.maps_state = {
-                "current_target_index": 0
-            }
-            job.fixed_code = {"edits": []}
+        node_to_edit = job.tracked_nodes[0]
 
-        if job.maps_state["current_target_index"] >= len(job.extracted_nodes):
-            # We finished navigating all symbols
-            del job.maps_state
-            return "SYNTAX_GATE", job
+        filepath = node_to_edit["filepath"]
+        start_byte = node_to_edit["start_byte"]
+        end_byte = node_to_edit["end_byte"]
 
-        target_info = job.extracted_nodes[job.maps_state["current_target_index"]]
-        current_symbol = target_info["symbol"]
-        node_text = target_info["node_string"]
+        with open(filepath, "rb") as f:
+            source = f.read()
+        node_snippet = source[start_byte:end_byte].decode("utf-8", errors="replace")
 
-        logger.info(f"[{self.name}] Operating on {current_symbol}")
+        lsp_service = context.services.lsp
+        diagnostics = "No LSP data."
+        hover_info = "No hover data."
+
+        if lsp_service and lsp_service.is_running():
+            diagnostics = json.dumps(lsp_service.get_diagnostics(filepath), indent=2)
+            hover_info = lsp_service.get_hover(filepath, 0, 0)
+
+        model_info = self.config_manager.get_model_info("MAPS_THINK")
+        state_config = self.config_manager.config["states"]["MAPS_THINK"]
 
         error_context = ""
-        if job.llm_feedback:
-            error_context += f"PREVIOUS ERROR: {job.llm_feedback}\n\n"
-        if hasattr(job, "test_stdout") and job.test_stdout:
-            error_context += f"TEST FAILURE (Fix this error in your rewrite):\n{job.test_stdout}\n\n"
+        if getattr(job, "llm_feedback", None):
+            error_context = f"PREVIOUS ATTEMPT FAILED:\n{job.llm_feedback}\n"
 
-        variables = {
-            "intent": job.intent,
-            "error_context": error_context,
-            "current_symbol": current_symbol,
-            "current_node_type": "node",
-            "node_text": node_text
-        }
+        user_prompt = self.config_manager.render_prompt(
+            state_config["user_prompt_template"],
+            {
+                "intent": context.intent,
+                "current_symbol": node_to_edit["symbol"],
+                "error_context": error_context,
+                "node_snippet": node_snippet,
+                "hover_info": hover_info,
+                "diagnostics": diagnostics,
+            },
+        )
 
-        system_prompt = self.config_manager.render_prompt(self.config.get("system_prompt", ""), variables)
-        user_prompt = self.config_manager.render_prompt(self.config.get("user_prompt_template", ""), variables)
+        query = QueryLLM(
+            model=model_info.get("model"), api_base=model_info.get("api_base")
+        )
+        status, result = query.tick(
+            {
+                "system": state_config["system_prompt"],
+                "user": user_prompt,
+                "params": model_info.get("params", {}),
+                "response_model": MapsThinkResponse,
+            },
+            context,
+        )
 
-        status, response = self.llm.tick({
-            "system": system_prompt,
-            "user": user_prompt,
-            "params": self.config.get("params", {}),
-            "post_process": self.config.get("post_process")
-        })
+        record_interaction(
+            context, "MAPS_THINK", state_config["system_prompt"], user_prompt, result
+        )
 
         if status != "SUCCESS":
-            logger.error(f"[{self.name}] LLM generation failed: {response}")
-            job.llm_feedback = "Failed to extract SEARCH/REPLACE block. Make sure to use <<<< and ==== and >>>>."
-            job.retry_count += 1
-            if job.retry_count > 3:
-                logger.error("Circuit breaker triggered in MAPS: Too many retries.")
-                return "ABORT", job
-            return "MAPS", job
+            job.llm_feedback = f"Failed to get structured diagnosis: {result}"
+            return "MAPS_NAV", job
 
-        job.llm_feedback = ""
+        if result.action == "skip":
+            logger.info("MAPS_THINK chose to skip. No changes needed for this symbol.")
+            job.tracked_nodes.pop(0)
+            return "MAPS_THINK", job
 
-        search_text = response.get("search", "")
-        replace_text = response.get("replace", "")
+        if result.action == "abort":
+            return "MAPS_NAV", job
 
-        # Prevent empty REPLACE block wiping out code if it perfectly matches the node
-        if search_text and not replace_text.strip() and search_text.strip() == node_text.strip():
-            job.llm_feedback = "The REPLACE block is empty, which would delete the entire symbol. Please provide the replacement code."
-            job.retry_count += 1
-            if job.retry_count > 3:
-                logger.error("Circuit breaker triggered in MAPS: Empty REPLACE block.")
-                return "ABORT", job
-            return "MAPS", job
+        job.maps_state["locked_node_id"] = node_to_edit.get("node_type", "unknown")
+        job.maps_state["locked_range"] = (start_byte, end_byte)
+        job.maps_state["draft_code"] = result.draft_code
+        job.fixed_code = {"filepath": filepath, "edits": []}
 
-        # Resilient match: Normalize line endings for the existence check
-        # This prevents mismatches if the source has CRLF but the LLM/parser joined with LF.
-        search_norm = search_text.replace("\r\n", "\n").strip()
-        node_norm = node_text.replace("\r\n", "\n")
+        return "MAPS_SURGEON", job
 
-        if search_norm not in node_norm:
-            job.llm_feedback = f"The SEARCH block text was not found exactly within the target symbol '{current_symbol}'. Please ensure exact whitespace and spelling."
-            job.retry_count += 1
-            if job.retry_count > 3:
-                logger.error("Circuit breaker triggered in MAPS: SEARCH block not found.")
-                return "ABORT", job
-            return "MAPS", job
 
-        edit = {
-            "symbol": current_symbol,
-            "start_byte": target_info["start_byte"],
-            "end_byte": target_info["end_byte"],
-            "search_text": search_text,
-            "replace_text": replace_text,
-            "new_code": replace_text # Used for SYNTAX_GATE validation
-        }
+class MAPS_SURGEON(State):
+    """
+    3rd Phase: Strict surgical formatting and Ghost Check validation.
+    """
+
+    def __init__(self, config_manager, profile):
+        super().__init__("MAPS_SURGEON")
+        self.config_manager = config_manager
+        self.profile = profile
+
+    def tick(self, job: JobPayload, context: EngineContext) -> Tuple[str, JobPayload]:
+        model_info = self.config_manager.get_model_info("MAPS_SURGEON")
+        state_config = self.config_manager.config["states"]["MAPS_SURGEON"]
+
+        error_context = ""
+        if getattr(job, "llm_feedback", None):
+            error_context = f"PREVIOUS ATTEMPT FAILED:\n{job.llm_feedback}\n"
+
+        user_prompt = self.config_manager.render_prompt(
+            state_config["user_prompt_template"],
+            {
+                "error_context": error_context,
+                "draft_code": job.maps_state["draft_code"],
+                "target_id": job.maps_state["locked_node_id"],
+            },
+        )
+
+        query = QueryLLM(
+            model=model_info.get("model"), api_base=model_info.get("api_base")
+        )
+        status, result = query.tick(
+            {
+                "system": state_config["system_prompt"],
+                "user": user_prompt,
+                "params": model_info.get("params", {}),
+                "response_model": MapsSurgeonResponse,
+            },
+            context,
+        )
+
+        record_interaction(
+            context, "MAPS_SURGEON", state_config["system_prompt"], user_prompt, result
+        )
+
+        if status != "SUCCESS":
+            job.llm_feedback = f"Failed to get structured surgical command: {result}"
+            return "MAPS_NAV", job
+
+        action = result.action
+        code = result.code
+        target_id = job.maps_state["locked_node_id"]
+
+        # Use locked_range if available, otherwise look up in id_map
+        if "locked_range" in job.maps_state:
+            t_start, t_end = job.maps_state["locked_range"]
+        else:
+            id_map = job.maps_state["id_map"]
+            t_start, t_end = id_map[target_id]
+
+        edit = {"start_byte": t_start, "end_byte": t_end, "new_code": code}
+
+        if action == "delete":
+            edit["new_code"] = ""
+        elif action == "insert_before":
+            edit["end_byte"] = t_start
+        elif action == "insert_after":
+            edit["start_byte"] = t_end
+
+        # GHOST CHECK
+        lsp_service = context.services.lsp
+        if lsp_service and lsp_service.is_running():
+            filepath = job.fixed_code["filepath"]
+            with open(filepath, "rb") as f:
+                original_source = f.read()
+
+            # Apply edit to shadow buffer
+            temp_source = bytearray(original_source)
+            temp_source[edit["start_byte"] : edit["end_byte"]] = edit[
+                "new_code"
+            ].encode("utf-8")
+            shadow_content = temp_source.decode("utf-8", errors="replace")
+
+            # Notify LSP
+            old_diags = len(lsp_service.get_diagnostics(filepath))
+            lsp_service.did_change(filepath, shadow_content)
+            new_diags = len(lsp_service.get_diagnostics(filepath))
+
+            logger.info(f"Ghost Check: Diagnostics {old_diags} -> {new_diags}")
+
+            if new_diags > old_diags:
+                logger.warning(
+                    "Ghost Check failed: Diagnostics increased! Aborting edit."
+                )
+                job.llm_feedback = (
+                    "Your edit introduced NEW compiler errors. Re-evaluating."
+                )
+                return "MAPS_THINK", job
 
         job.fixed_code["edits"].append(edit)
-        logger.info(f"[{self.name}] Queued search/replace edit for {current_symbol}")
-        
-        job.maps_state["current_target_index"] += 1
-        return "MAPS", job
-
-class SYNTAX_GATE(State):
-    """
-    Validates all generated code snippets before they touch the disk.
-    """
-    def __init__(self, profile):
-        super().__init__("SYNTAX_GATE")
-        self.gate = SyntaxGate(profile.get_language_ptr())
-
-    def tick(self, job: JobPayload) -> Tuple[str, Any]:
-        logger.info(f"[{self.name}] Validating surgical ASTs...")
-
-        if not isinstance(job.fixed_code, dict) or "edits" not in job.fixed_code:
-            job.llm_feedback = "Edits array missing."
-            return "MAPS", job
-
-        for edit in job.fixed_code["edits"]:
-            # Note: Validating a partial block (replace_text) might yield syntax errors if the block
-            # isn't a complete syntactic unit. We will validate it anyway, but it could be improved
-            # to validate the entire patched node.
-            result = self.gate.validate(edit["new_code"])
-            if not result["valid"]:
-                error_msg = result['error_message']
-                symbol_name = edit.get('symbol', 'unknown')
-                logger.error(f"[{self.name}] Syntax validation failed for {symbol_name}: {error_msg}")
-                job.llm_feedback = f"Syntax error in {symbol_name}: {error_msg}"
-                job.retry_count += 1
-                if job.retry_count > 3:
-                    logger.error("Circuit breaker triggered in SYNTAX_GATE: Too many retries.")
-                    return "ABORT", job
-                return "ROUTER", job
-
-        job.llm_feedback = ""
         return "ACTUATE", job
+
 
 class ACTUATE(State):
     """
-    Splices all valid edits into the file using BlockSplice.
+    Splices patches into the source file and prepares for the next step.
     """
+
     def __init__(self):
         super().__init__("ACTUATE")
-        self.splicer = BlockSplice()
 
-    def tick(self, job: JobPayload) -> Tuple[str, Any]:
-        if not job.extracted_nodes:
-            logger.error(f"[{self.name}] No surgical target acquired! Aborting splice.")
-            return "ABORT", job
+    def tick(self, job: JobPayload, context: EngineContext) -> Tuple[str, JobPayload]:
+        logger.info("Actuating surgical edits to disk...")
 
-        filepath = job.target_files[job.current_file_index]
+        if not job.fixed_code:
+            return "MAPS_NAV", job
 
-        edits_to_apply = []
-        provided_edits = job.fixed_code.get("edits", [])
-
-        for edit in provided_edits:
-            edits_to_apply.append({
-                "start_byte": edit["start_byte"],
-                "end_byte": edit["end_byte"],
-                "search_text": edit["search_text"],
-                "replace_text": edit["replace_text"]
-            })
-
-        logger.info(f"[{self.name}] Splicing {len(edits_to_apply)} blocks in {filepath}")
-
-        status, result = self.splicer.tick({
-            "filepath": filepath,
-            "edits": edits_to_apply
-        })
+        splicer = BlockSplice()
+        status, result = splicer.tick(job.fixed_code, context)
 
         if status == "SUCCESS":
-            return "EVALUATE", job
-        
-        logger.error(f"[{self.name}] Splice failed: {result}")
-        job.llm_feedback = f"Splice failed: {result}"
-        return "ROUTER", job
+            if job.tracked_nodes:
+                job.tracked_nodes.pop(0)
+
+            job.fixed_code = None
+            if "navigation_stack" in job.maps_state:
+                del job.maps_state["navigation_stack"]
+
+            if job.tracked_nodes:
+                return "MAPS_THINK", job
+            else:
+                return "MAPS_NAV", job
+        else:
+            logger.error(f"Actuation failed: {result}")
+            return "ABORT", job
+
 
 class POST_MORTEM(State):
     """
-    Final state that summarizes the session, logs metrics, and saves a report.
+    Summarizes the repair session results and generates optimization cases on failure.
     """
-    def __init__(self, config_manager: Any):
+
+    def __init__(self, config_manager):
         super().__init__("POST_MORTEM")
         self.config_manager = config_manager
-        self.config = config_manager.get_model_info("POST_MORTEM")
-        # Optional: Use LLM to summarize the fix
-        self.query_llm = QueryLLM(model=self.config.get("model"), api_base=self.config.get("api_base"))
 
-    def tick(self, job: Any) -> Tuple[str, Any]:
-        import json
-        import os
-        from datetime import datetime
+    def tick(self, job: JobPayload, context: EngineContext) -> Tuple[str, JobPayload]:
+        logger.info("Repair session complete. summarized results.")
 
-        # Extract data from JobPayload or dict
-        if hasattr(job, "intent"):
-             # JobPayload
-             report = {
-                 "timestamp": datetime.now().isoformat(),
-                 "intent": job.intent,
-                 "final_state": "SUCCESS" if job.test_stdout == "" else "FAILED", # Rough heuristic
-                 "retry_count": job.retry_count,
-                 "target_files": job.target_files,
-                 "plan_history": job.plan_history,
-                 "test_output_summary": job.test_stdout[:500] if job.test_stdout else "All tests passed."
-             }
-        else:
-             # Dict-based (e.g. if we failed early in TRIAGE)
-             report = {
-                 "timestamp": datetime.now().isoformat(),
-                 "intent": job.get("intent", "Unknown"),
-                 "final_state": "ABORTED_EARLY",
-                 "retry_count": 0,
-                 "target_files": job.get("target_files", []),
-                 "plan_history": [],
-                 "test_output_summary": "Session ended before job execution."
-             }
+        # Self-Optimization Trigger: If we failed or had high retries
+        if (job.retry_count > 3 or job.llm_feedback) and context.interaction_history:
+            logger.info(
+                "High retry count or feedback detected. Generating self-optimization case..."
+            )
 
-        # Log it
-        logger.info(f"[{self.name}] --- SESSION SUMMARY ---")
-        logger.info(f"[{self.name}] Intent: {report['intent']}")
-        logger.info(f"[{self.name}] Status: {report['final_state']}")
-        logger.info(f"[{self.name}] Retries: {report['retry_count']}")
-        
-        # Save to logs directory
-        if not os.path.exists("logs"):
-            os.makedirs("logs")
-            
-        filename = f"logs/{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.jsonl"
-        with open(filename, "w") as f:
-            f.write(json.dumps(report) + "\n")
-            
-        logger.info(f"[{self.name}] Report saved to {filename}")
-        
+            model_info = self.config_manager.get_model_info("POST_MORTEM")
+            state_config = self.config_manager.config["states"]["POST_MORTEM"]
+
+            # Format history for the LLM - Limit to last 5 to keep context clean
+            history_str = ""
+            visible_history = context.interaction_history[-5:]
+            for i, trace in enumerate(visible_history):
+                history_str += f"\n--- Interaction {i} ({trace.state}) ---\n"
+                history_str += f"System: {trace.system_prompt[:200]}...\n"
+                history_str += f"User: {trace.user_prompt[:500]}...\n"
+                history_str += f"Response: {trace.response[:500]}...\n"
+
+            user_prompt = self.config_manager.render_prompt(
+                state_config["user_prompt_template"], {"history": history_str}
+            )
+
+            query = QueryLLM(
+                model=model_info.get("model"), api_base=model_info.get("api_base")
+            )
+            status, result = query.tick(
+                {
+                    "system": state_config["system_prompt"],
+                    "user": user_prompt,
+                    "params": model_info.get("params", {}),
+                    "response_model": SelfOptimizationResponse,
+                },
+                context,
+            )
+
+            if status == "SUCCESS":
+                case_file = "tests/llm_cases.json"
+                try:
+                    cases = []
+                    if os.path.exists(case_file):
+                        with open(case_file, "r") as f:
+                            cases = json.load(f)
+
+                    cases.append(result.model_dump())
+
+                    with open(case_file, "w") as f:
+                        json.dump(cases, f, indent=2)
+
+                    logger.info(
+                        f"Successfully recorded new optimization case to {case_file}"
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to save optimization case: {e}")
+
         return "FINISH", job
+
+
+class FILE_EXPLORER(State):
+    """
+    AST-guided file explorer. Lets the LLM navigate the file system and see skeletons.
+    """
+
+    def __init__(self, config_manager, profile):
+        super().__init__("FILE_EXPLORER")
+        self.config_manager = config_manager
+        self.profile = profile
+
+    def tick(self, job: JobPayload, context: EngineContext) -> Tuple[str, JobPayload]:
+        logger.info("Exploring files...")
+
+        # Persistent navigation state
+        if "explorer_path" not in job.maps_state:
+            job.maps_state["explorer_path"] = "."
+
+        current_dir = job.maps_state["explorer_path"]
+
+        # Get Directory Listing
+        try:
+            items = os.listdir(current_dir)
+            files = [f for f in items if os.path.isfile(os.path.join(current_dir, f))]
+            dirs = [d for d in items if os.path.isdir(os.path.join(current_dir, d))]
+        except Exception as e:
+            job.llm_feedback = f"Error reading directory: {e}"
+            job.maps_state["explorer_path"] = "."
+            return "FILE_EXPLORER", job
+
+        model_info = self.config_manager.get_model_info("FILE_EXPLORER")
+        state_config = self.config_manager.config["states"]["FILE_EXPLORER"]
+
+        # View of current location
+        view = f"Current Directory: {current_dir}\n"
+        view += "Directories: " + ", ".join(dirs) + "\n"
+        view += "Files: " + ", ".join(files) + "\n"
+
+        # If previewing a file, show skeleton
+        if "preview_file" in job.maps_state:
+            preview_path = job.maps_state["preview_file"]
+            # Use AST navigation view with temporary IDs for cursor-based exploration
+            with open(preview_path, "rb") as f:
+                source = f.read()
+            sensor = TreeSitterSensor(self.profile.get_language_ptr())
+            ast_view, id_map = sensor.render_node_children(source, 0, len(source))
+            view += f"\n--- AST PREVIEW: {preview_path} (Use 'dive <id>', 'rise', 'inspect') ---\n{ast_view}"
+            job.maps_state["ast_id_map"] = id_map
+
+        user_prompt = self.config_manager.render_prompt(
+            state_config["user_prompt_template"],
+            {
+                "intent": context.intent,
+                "explorer_view": view,
+                "llm_feedback": job.llm_feedback or "",
+            },
+        )
+
+        query = QueryLLM(
+            model=model_info.get("model"), api_base=model_info.get("api_base")
+        )
+        status, result = query.tick(
+            {
+                "system": state_config["system_prompt"],
+                "user": user_prompt,
+                "params": model_info.get("params", {}),
+                "response_model": FileExplorerResponse,
+            },
+            context,
+        )
+
+        record_interaction(
+            context, "FILE_EXPLORER", state_config["system_prompt"], user_prompt, result
+        )
+
+        if status != "SUCCESS":
+            return "FILE_EXPLORER", job
+
+        action = result.action
+        target = result.target
+        job.llm_feedback = None
+
+        if action == "ls":
+            # Refresh view essentially
+            return "FILE_EXPLORER", job
+        elif action == "cd":
+            new_path = os.path.normpath(os.path.join(current_dir, target))
+            if os.path.isdir(new_path):
+                job.maps_state["explorer_path"] = new_path
+                if "preview_file" in job.maps_state:
+                    del job.maps_state["preview_file"]
+            else:
+                job.llm_feedback = f"'{target}' is not a directory."
+            return "FILE_EXPLORER", job
+        elif action == "up":
+            job.maps_state["explorer_path"] = os.path.dirname(current_dir) or "."
+            if "preview_file" in job.maps_state:
+                del job.maps_state["preview_file"]
+            return "FILE_EXPLORER", job
+        elif action == "preview":
+            preview_path = os.path.normpath(os.path.join(current_dir, target))
+            if os.path.isfile(preview_path):
+                job.maps_state["preview_file"] = preview_path
+                # Initialize AST navigation context
+                job.maps_state["ast_start"] = 0
+                job.maps_state["ast_end"] = None
+                job.maps_state["ast_stack"] = []
+            else:
+                job.llm_feedback = f"'{target}' is not a file."
+            return "FILE_EXPLORER", job
+        elif action == "dive":
+            if (
+                "ast_id_map" in job.maps_state
+                and target in job.maps_state["ast_id_map"]
+            ):
+                start_byte, end_byte = job.maps_state["ast_id_map"][target]
+                # Push current range to stack
+                job.maps_state["ast_stack"].append(
+                    (job.maps_state["ast_start"], job.maps_state["ast_end"])
+                )
+                # Update to selected node's range
+                job.maps_state["ast_start"] = start_byte
+                job.maps_state["ast_end"] = end_byte
+            else:
+                job.llm_feedback = f"Invalid node ID: {target}"
+            return "FILE_EXPLORER", job
+        elif action == "rise":
+            if job.maps_state["ast_stack"]:
+                job.maps_state["ast_start"], job.maps_state["ast_end"] = job.maps_state[
+                    "ast_stack"
+                ].pop()
+            else:
+                job.llm_feedback = "Already at root of AST"
+            return "FILE_EXPLORER", job
+        elif action == "spawn":
+            # Transition to SPAWN state which will handle the multi-point investigation
+            return "SPAWN", job
+
+        return "FILE_EXPLORER", job
+
+
+class SPAWN(State):
+    """
+    Converts 'spawn' targets into actual work items.
+    """
+
+    def __init__(self, config_manager):
+        super().__init__("SPAWN")
+        self.config_manager = config_manager
+
+    def tick(self, job: JobPayload, context: EngineContext) -> Tuple[str, JobPayload]:
+        logger.info("Spawning investigation points...")
+
+        model_info = self.config_manager.get_model_info("SPAWN")
+        state_config = self.config_manager.config["states"]["SPAWN"]
+
+        user_prompt = self.config_manager.render_prompt(
+            state_config["user_prompt_template"], {"intent": context.intent}
+        )
+
+        query = QueryLLM(
+            model=model_info.get("model"), api_base=model_info.get("api_base")
+        )
+        status, result = query.tick(
+            {
+                "system": state_config["system_prompt"],
+                "user": user_prompt,
+                "params": model_info.get("params", {}),
+                "response_model": SpawnResponse,
+            },
+            context,
+        )
+
+        record_interaction(
+            context, "SPAWN", state_config["system_prompt"], user_prompt, result
+        )
+
+        if status != "SUCCESS":
+            return "FILE_EXPLORER", job
+
+        # Convert Spawn targets into ThinkingSteps
+        steps = []
+        for t in result.targets:
+            # We assume t is a symbol name or file:symbol
+            steps.append(ThinkingStep(symbol=t))
+
+        plan = ThinkingResponse(reasoning=result.reasoning, steps=steps)
+        job.plan = plan
+        job.plan_history.append(f"Spawned investigation: {plan.reasoning}")
+
+        job.maps_state = {
+            "current_step_index": 0,
+            "steps": [step.model_dump() for step in plan.steps],
+        }
+
+        return "MAPS_NAV", job

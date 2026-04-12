@@ -1,204 +1,131 @@
 import json
-import logging
 import os
-import re
+from typing import Any
+
 import textgrad as tg
-from typing import Any, Dict, List, Tuple
+from textgrad.engine_experimental.litellm import LiteLLMEngine
 
-# Set environment variables for LiteLLM
-os.environ["OPENAI_API_BASE"] = "http://100.92.54.124:8080/v1"
-os.environ["OPENAI_API_KEY"] = "sk-no-key"
 
-from ariadne.components import SyntaxGate
-from ariadne.profiles.rust_profile import RustProfile
+def load_config():
+    with open("ariadne_config.json", "r") as f:
+        return json.load(f)
 
-# Setup logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("ariadne.optimizer")
 
-class EngineWrapper:
-    """
-    Wraps the TextGrad engine to handle thinking tokens and enforce formatting tags.
-    """
-    def __init__(self, engine, tags):
-        self.engine = engine
-        self.tags = tags
+def save_config(config):
+    with open("ariadne_config.json", "w") as f:
+        json.dump(config, f, indent=2)
 
-    def __call__(self, prompt, **kwargs):
-        response = self.engine(prompt, **kwargs)
-        # 1. Strip thinking tokens (common in Qwen)
-        response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
-        response = re.sub(r"^</think>", "", response).strip()
-        
-        # 2. Enforce TextGrad tags if missing
-        if self.tags[0] not in response:
-            logger.warning(f"Engine output missing tags {self.tags[0]}. Wrapping response manually.")
-            response = f"{self.tags[0]}\n{response}\n{self.tags[1]}"
-            
-        return response
 
-    def generate(self, *args, **kwargs):
-        return self.__call__(*args, **kwargs)
+def load_cases():
+    with open("tests/llm_cases.json", "r") as f:
+        return json.load(f)
 
-class MapsLoss(tg.loss.Module):
-    """
-    Custom Loss Function for MAPS state using Markdown SEARCH/REPLACE blocks.
-    Evaluates LLM output via existence of blocks and matching content.
-    """
-    def __init__(self, language_ptr):
-        super().__init__()
-        self.syntax_gate = SyntaxGate(language_ptr)
 
-    def forward(self, response_variable: tg.Variable, context: Dict[str, Any]) -> tg.Variable:
-        response_text = response_variable.value
-        node_text = context.get("node_text", "")
-        
-        # 1. Extract SEARCH/REPLACE blocks
-        search_pattern = r"<<<<\n(.*?)\n====\n(.*?)\n>>>>"
-        matches = re.findall(search_pattern, response_text, re.DOTALL)
-        
-        if not matches:
-            return tg.Variable(
-                "CRITICAL FAILURE: No SEARCH/REPLACE block found. "
-                "The output MUST contain a block starting with '<<<<', separated by '====', and ending with '>>>>'. "
-                "Ensure the block is formatted exactly as specified in the system prompt.",
-                role_description="feedback"
-            )
+def optimize():
+    config = load_config()
+    cases = load_cases()
 
-        feedback = []
-        
-        for search_text, replace_text in matches:
-            # 2. Check if SEARCH text exists in node_text
-            if search_text not in node_text:
-                feedback.append(
-                    f"SEARCH ERROR: The SEARCH block text was not found exactly within the target code. "
-                    f"Expected substring:\n{search_text}\n"
-                    f"Actual target code:\n{node_text}\n"
-                    f"The model must copy the code EXACTLY, including all whitespace, indentation, and comments."
+    # 1. Get configuration
+    default_cfg = config.get("default", {})
+    local_base = default_cfg.get("api_base", "http://localhost:8080/v1")
+    local_model = default_cfg.get("model", "openai/llama-cpp")
+
+    # 2. Setup Judge (Teacher) engine - OpenRouter if available
+    or_key = os.getenv("OPENROUTER_API_KEY")
+    if or_key:
+        print("Using OpenRouter (Qwen Plus) as the Optimization Judge...")
+        # LiteLLM handles the base_url automatically for openrouter/ models
+        os.environ["OPENROUTER_API_KEY"] = or_key
+        judge_engine = LiteLLMEngine(model_string="openrouter/qwen/qwen3.6-plus:free")
+    else:
+        print(
+            "No OpenRouter key found. Using local model as judge (Self-Optimization mode)."
+        )
+        os.environ["OPENAI_API_BASE"] = local_base
+        os.environ["OPENAI_API_KEY"] = "none"
+        judge_engine = LiteLLMEngine(model_string=local_model)
+
+    # 3. Setup target (Student) engine - always local
+    # We must ensure OPENAI_API_BASE is set for the local student run
+    os.environ["OPENAI_API_BASE"] = local_base
+    os.environ["OPENAI_API_KEY"] = "none"
+    student_engine = LiteLLMEngine(model_string=local_model)
+
+    # Set the judge engine for backward passes (gradients)
+    tg.set_backward_engine(judge_engine, override=True)
+
+    print(f"Testing prompts against Local Endpoint: {local_base} ({local_model})")
+
+    for case in cases:
+        state_name = case["state"]
+        print(f"\n--- Evaluating Case: {case['id']} ({state_name}) ---")
+
+        state_config = config["states"][state_name]
+
+        # Define the variable to optimize
+        system_prompt_var = tg.Variable(
+            state_config["system_prompt"],
+            role_description="The system prompt instructing the AI on how to navigate or edit the AST",
+            requires_grad=True,
+        )
+
+        # Construct input
+        user_prompt_template = state_config["user_prompt_template"]
+        user_prompt_text = user_prompt_template
+        for key, value in case.items():
+            if f"{{{{{key}}}}}" in user_prompt_text:
+                user_prompt_text = user_prompt_text.replace(
+                    f"{{{{{key}}}}}", str(value)
                 )
 
-            # 3. Check Syntax of REPLACE text (optional/best-effort)
-            # Since replace_text might be a fragment, we'll try to validate it in context
-            # but for now, we just check if it's empty when it shouldn't be.
-            if not replace_text.strip() and search_text.strip():
-                 # This might be a deletion, which is valid, but let's warn if intent wasn't deletion
-                 if "remove" not in context.get("intent", "").lower() and "delete" not in context.get("intent", "").lower():
-                     feedback.append("WARNING: REPLACE block is empty but intent does not seem to be deletion.")
-
-        if not feedback:
-            return tg.Variable("SUCCESS: The output contains a valid SEARCH/REPLACE block that matches the target code.", role_description="feedback")
-        
-        return tg.Variable("\n".join(feedback), role_description="feedback")
-
-def run_optimization():
-    with open("ariadne_config.json", "r") as f:
-        config = json.load(f)
-    
-    maps_config = config["states"]["MAPS"]
-    initial_system = maps_config["system_prompt"]
-    initial_user = maps_config["user_prompt_template"]
-
-    from textgrad.engine import LiteLLMEngine
-    raw_engine = LiteLLMEngine(model_string="openai/qwen")
-    
-    tags = ["<IMPROVED_VARIABLE>", "</IMPROVED_VARIABLE>"]
-    engine = EngineWrapper(raw_engine, tags)
-    tg.set_backward_engine(engine)
-
-    system_prompt = tg.Variable(
-        initial_system, 
-        requires_grad=True, 
-        role_description="system prompt for the Micro AST Procedural Surgeon (MAPS) state"
-    )
-
-    # UPDATED CONSTRAINTS for SEARCH/REPLACE
-    constraints = [
-        "The prompt MUST explicitly state the SEARCH/REPLACE format: <<<<, ====, >>>>.",
-        "The prompt MUST emphasize that the SEARCH block MUST match the target code EXACTLY, bit-for-bit.",
-        "The prompt MUST forbid JSON output.",
-        "The prompt SHOULD suggest including some context lines in the SEARCH block to ensure uniqueness."
-    ]
-
-    optimizer = tg.TGD(parameters=[system_prompt], new_variable_tags=tags, constraints=constraints)
-    model = tg.BlackboxLLM(system_prompt=system_prompt, engine=engine)
-
-    profile = RustProfile()
-    lang_ptr = profile.get_language_ptr()
-    
-    sample_inputs = [
-        {
-            "intent": "Rename field 'hp' to 'health'",
-            "error_context": "error[E0609]: no field `hp` on type `Entity`",
-            "current_symbol": "Entity",
-            "current_node_type": "struct_item",
-            "node_text": "pub struct Entity {\n    pub hp: f32,\n    pub x: f32,\n    pub y: f32,\n}"
-        },
-        {
-            "intent": "Fix typo in println! macro",
-            "error_context": "error: cannot find macro `prntln` in this scope",
-            "current_symbol": "main",
-            "current_node_type": "function_item",
-            "node_text": "fn main() {\n    prntln!(\"Hello, world!\");\n}"
-        },
-        {
-            "intent": "Add missing return type i32",
-            "error_context": "error[E0308]: mismatched types. expected `i32`, found `()` ",
-            "current_symbol": "add",
-            "current_node_type": "function_item",
-            "node_text": "fn add(a: i32, b: i32) {\n    a + b\n}"
-        },
-        {
-            "intent": "Change parameter type from i32 to f32",
-            "error_context": "error[E0308]: mismatched types. expected `f32`, found `i32`",
-            "current_symbol": "sqrt",
-            "current_node_type": "function_item",
-            "node_text": "fn sqrt(val: i32) -> f32 {\n    val.sqrt()\n}"
-        },
-        {
-            "intent": "Publicize the struct",
-            "error_context": "error[E0603]: struct `Data` is private",
-            "current_symbol": "Data",
-            "current_node_type": "struct_item",
-            "node_text": "struct Data {\n    value: i32,\n}"
-        }
-    ]
-
-    loss_fn = MapsLoss(lang_ptr)
-
-    for epoch in range(2): 
-        logger.info(f"=== Starting Epoch {epoch + 1} ===")
-        
-        for idx, input_data in enumerate(sample_inputs):
-            optimizer.zero_grad()
-            
-            rendered_user = initial_user \
-                .replace("{{intent}}", input_data["intent"]) \
-                .replace("{{error_context}}", input_data["error_context"]) \
-                .replace("{{current_symbol}}", input_data["current_symbol"]) \
-                .replace("{{current_node_type}}", input_data["current_node_type"]) \
-                .replace("{{node_text}}", input_data["node_text"])
-            
-            user_input_var = tg.Variable(
-                rendered_user, 
-                role_description="user input containing the intent, error context, and target code"
+        if "{{error_context}}" in user_prompt_text:
+            user_prompt_text = user_prompt_text.replace(
+                "{{error_context}}", case.get("error_context", "")
             )
-            
-            logger.info(f"Processing input {idx + 1}...")
-            
-            response = model(user_input_var)
-            loss = loss_fn(response, input_data)
-            logger.info(f"Input {idx + 1} Loss/Feedback: {loss.value}")
-            
-            loss.backward()
-            optimizer.step()
-            
-            logger.info(f"Finished processing input {idx + 1}")
 
-    print("\n--- Optimization Complete ---")
-    print(f"Optimized System Prompt:\n{system_prompt.value}")
-    
-    # Optional: Write the optimized prompt back to config?
-    # No, better let the user decide.
+        input_var = tg.Variable(
+            user_prompt_text,
+            role_description="The current state of the AST and user intent",
+        )
+
+        # The Student (local model) makes the prediction
+        model = tg.BlackboxLLM(engine=student_engine, system_prompt=system_prompt_var)
+        prediction = model(input_var)
+
+        print(f"Student Prediction: {prediction.value}")
+
+        # Define evaluation criteria
+        expected = case.get("expected_action") or case.get("expected_symbol_target")
+        anti_expected = case.get("anti_expected_action") or case.get(
+            "anti_expected_symbol_target"
+        )
+
+        eval_instruction = f"Evaluate if the prediction correctly chooses the action or target '{expected}'. It MUST NOT choose '{anti_expected}'. If it chose the wrong one, provide a gradient to fix the system prompt to explicitly forbid that failure mode."
+
+        # The Teacher (strong model) evaluates the student
+        evaluator = tg.TextLoss(
+            eval_system_prompt=eval_instruction, engine=judge_engine
+        )
+
+        loss = evaluator(prediction)
+        print(f"Judge Feedback: {loss.value}")
+
+        if loss.value.lower().startswith("pass") or "correct" in loss.value.lower():
+            print("Case passed. No optimization needed.")
+            continue
+
+        print("Optimizing system prompt using Judge's gradients...")
+
+        optimizer = tg.TGD(parameters=[system_prompt_var])
+        loss.backward()
+        optimizer.step()
+
+        print(f"\nOptimized System Prompt:\n{system_prompt_var.value}")
+
+        config["states"][state_name]["system_prompt"] = system_prompt_var.value
+        save_config(config)
+        print(f"Updated ariadne_config.json for {state_name}")
+
 
 if __name__ == "__main__":
-    run_optimization()
+    optimize()

@@ -1,101 +1,100 @@
-import re
-from typing import Any, Optional
-import tree_sitter_rust
-from .base import LanguageProfile
+import tree_sitter
+from ariadne.components import SubprocessSensor
+import json
+from typing import Dict, Any
 
 
-class RustProfile(LanguageProfile):
+class CargoCheckHook:
     """
-    Profile for Rust, providing tree-sitter queries and build commands.
+    Extends the subprocess sensor to run cargo check --message-format=json and parse the output.
     """
 
-    @property
-    def name(self) -> str:
-        return "Rust"
+    def __init__(self, working_dir: str = "."):
+        self.sensor = SubprocessSensor(["cargo", "check", "--message-format=json"])
+        self.working_dir = working_dir
 
-    @property
-    def extensions(self) -> list[str]:
-        return [".rs"]
+    def execute(self) -> Dict[str, Any]:
+        """
+        Run cargo check and parse JSON output into a clean dictionary.
 
-    def get_language_ptr(self) -> Any:
-        return tree_sitter_rust.language()
+        Returns:
+            Dictionary with keys: success (bool), messages (List[Dict]), errors (List[str])
+        """
+        result = self.sensor.execute()
 
-    def get_query(self, symbol_name: str) -> str:
-        """
-        Construct a tree-sitter query to find a named item (function, struct, etc.).
-        """
-        return f"""
-        [
-          (function_item name: (identifier) @symbol_name (#eq? @symbol_name "{symbol_name}"))
-          (struct_item name: (type_identifier) @symbol_name (#eq? @symbol_name "{symbol_name}"))
-          (enum_item name: (type_identifier) @symbol_name (#eq? @symbol_name "{symbol_name}"))
-          (trait_item name: (type_identifier) @symbol_name (#eq? @symbol_name "{symbol_name}"))
-          (type_item name: (type_identifier) @symbol_name (#eq? @symbol_name "{symbol_name}"))
-        ] @node
-        """
+        if not result["success"]:
+            return {
+                "success": False,
+                "messages": [],
+                "errors": [result["stderr"]] if result["stderr"] else ["Unknown error"],
+                "raw_output": result,
+            }
 
-    def get_skeleton_query(self) -> str:
-        """
-        Return the query to find all major items for skeletonization.
-        """
-        return """
-        [
-          (function_item)
-          (struct_item)
-          (enum_item)
-          (trait_item)
-          (impl_item)
-        ] @item
-        """
+        # Parse JSON lines output
+        messages = []
+        errors = []
 
-    @property
-    def skeleton_capture_name(self) -> str:
-        return "item"
+        for line in result["stdout"].strip().split("\n"):
+            if not line:
+                continue
+            try:
+                message = json.loads(line)
+                messages.append(message)
+                # Collect error messages
+                if (
+                    message.get("reason") == "compiler-message"
+                    and message.get("message", {}).get("level") == "error"
+                ):
+                    msg_data = message.get("message", {})
+                    errors.append(
+                        {
+                            "message": msg_data.get("message", ""),
+                            "code": msg_data.get("code", {}).get("code")
+                            if msg_data.get("code")
+                            else None,
+                            "span": msg_data.get("spans", [{}])[0]
+                            if msg_data.get("spans")
+                            else {},
+                        }
+                    )
+            except json.JSONDecodeError:
+                # Skip non-JSON lines
+                continue
 
-    @property
-    def test_generation_system_prompt(self) -> str:
-        return (
-            "You are a Rust testing expert. Your sole task is to generate isolated Rust unit tests.\n"
-            "The code provided in the context (`Context API Surface`) defines the available structs and functions.\n"
-            "Your output MUST contain ONLY `#[test]` functions.\n"
-            "DO NOT include any `struct` definitions.\n"
-            "DO NOT include any `impl` blocks for methods.\n"
-            "DO NOT include any `use` statements unless they are part of the test function itself.\n"
-            "Output RAW RUST CODE ONLY. No markdown, no explanations."
+        return {
+            "success": len(errors) == 0,
+            "messages": messages,
+            "errors": errors,
+            "raw_output": result,
+        }
+
+
+class AutoFixerActuator:
+    """
+    A component that runs cargo clippy --fix --allow-dirty and rustfmt to automatically heal formatting.
+    """
+
+    def __init__(self):
+        self.clippy_fix_sensor = SubprocessSensor(
+            ["cargo", "clippy", "--fix", "--allow-dirty"]
         )
+        self.rustfmt_sensor = SubprocessSensor(["rustfmt"])
 
-    def parse_search_result(self, response: str) -> Optional[str]:
+    def execute(self) -> Dict[str, Any]:
         """
-        Parse the LLM's raw response to extract the function/item name.
+        Run auto-fixing tools.
+
+        Returns:
+            Dictionary with success status and outputs from both tools
         """
-        target_name = response.strip()
+        # Run clippy fix first
+        clippy_result = self.clippy_fix_sensor.execute()
 
-        # Try to extract just the function name (e.g., from 'fn my_func')
-        fn_match = re.search(r"fn\s+(\w+)", target_name)
-        if fn_match:
-            return fn_match.group(1)
+        # Then run rustfmt
+        rustfmt_result = self.rustfmt_sensor.execute()
 
-        # Basic sanitization: take the first line, strip whitespace
-        target_name = target_name.split("\n")[0].strip()
-        return target_name if target_name else None
-
-    @property
-    def target_capture_name(self) -> str:
-        return "node"
-
-    @property
-    def coding_example(self) -> str:
-        return (
-            '{\n'
-            '  "edits": [\n'
-            '    {\n'
-            '      "symbol": "Entity",\n'
-            '      "new_code": "struct Entity {\\n    health: f32,\\n}"\n'
-            '    }\n'
-            '  ]\n'
-            '}'
-        )
-
-    @property
-    def check_command(self) -> list[str]:
-        return ["cargo", "check"]
+        return {
+            "success": clippy_result["success"] and rustfmt_result["success"],
+            "clippy": clippy_result,
+            "rustfmt": rustfmt_result,
+        }
