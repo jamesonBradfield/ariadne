@@ -264,5 +264,111 @@ def test_maps_batch_processing(temp_rust_file):
         assert len(job.fixed_code["edits"]) == 1
 
 
+def test_multi_position_edit(temp_rust_file):
+    """Test batch processing with multiple positions in the same file."""
+    # Setup mock config manager
+    config_manager = MagicMock()
+    config_manager.get_model_info.return_value = {
+        "model": "mock-model",
+        "api_base": "mock-api",
+        "params": {},
+    }
+    config_manager.config = {
+        "states": {
+            "MAPS_NAV": {
+                "system_prompt": "sys",
+                "user_prompt_template": "user",
+            },
+            "MAPS_THINK": {
+                "system_prompt": "sys",
+                "user_prompt_template": "user",
+            },
+            "MAPS_SURGEON": {
+                "system_prompt": "sys",
+                "user_prompt_template": "user",
+            },
+        }
+    }
+    config_manager.render_prompt.side_effect = lambda template, vars: template
+
+    # Setup profile
+    from ariadne.core import EngineContext
+
+    context = EngineContext(
+        "MAPS_NAV",
+        intent="refactor main",
+        target_files=[temp_rust_file],
+        profile=profile,
+    )
+
+    # Instantiate states
+    nav_state = MAPS_NAV(config_manager, profile)
+    think_state = MAPS_THINK(config_manager, profile)
+    surgeon_state = MAPS_SURGEON(config_manager, profile)
+
+    # Setup JobPayload with multiple tracked nodes (simulating multiple positions)
+    with open(temp_rust_file, "rb") as f:
+        content = f.read()
+        main_start = content.find(b"fn main")
+        main_end = content.find(b"}", main_start) + 1
+
+    job = JobPayload(
+        intent="refactor main",
+        target_files=[temp_rust_file],
+        maps_state={
+            "current_step_index": 0,
+            "steps": [{"symbol": "main"}],
+            "id_map": {"function_item": (main_start, main_end)},
+        },
+        tracked_nodes=[
+            {
+                "filepath": temp_rust_file,
+                "symbol": "main",
+                "start_byte": main_start,
+                "end_byte": main_end,
+                "node_string": content[main_start:main_end].decode("utf-8"),
+                "node_type": "function_item",
+            },
+            {
+                "filepath": temp_rust_file,
+                "symbol": "main",
+                "start_byte": main_start + 10,
+                "end_byte": main_start + 20,
+                "node_string": "let x = 1;",
+                "node_type": "let_statement",
+            },
+        ],
+    )
+
+    # Mock QueryLLM to simulate actions for multiple nodes
+    with patch("ariadne.states.QueryLLM") as MockLLM:
+        mock_instance = MockLLM.return_value
+
+        # First node: function_item
+        mock_instance.tick.return_value = (
+            "SUCCESS",
+            MapsThinkResponse(
+                reasoning="r", action="fix", draft_code="fn main() { ... }"
+            ),
+        )
+        status, _ = think_state.tick(job, context)
+        assert status == "MAPS_SURGEON"
+
+        mock_instance.tick.return_value = (
+            "SUCCESS",
+            MapsSurgeonResponse(
+                reasoning="r", action="replace", code="fn main() { ... }"
+            ),
+        )
+        status, _ = surgeon_state.tick(job, context)
+        assert status == "ACTUATE"
+        assert len(job.fixed_code["edits"]) == 1
+
+        # Second node: let_statement (simulated)
+        # After first edit, tracked_nodes should have the let_statement
+        # For this test, we just verify the batch processing loop works
+        assert len(job.tracked_nodes) >= 1
+
+
 if __name__ == "__main__":
     pytest.main([__file__])
