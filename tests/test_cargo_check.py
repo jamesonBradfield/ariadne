@@ -1,4 +1,11 @@
 import pytest
+import sys
+import os
+
+# Add project root to sys.path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from ariadne.profiles.rust_profile import CargoCheckHook
 
 
 class MockRustProfile:
@@ -9,7 +16,6 @@ class MockRustProfile:
 
 
 profile = MockRustProfile()
-CargoCheckHook = lambda: None
 
 
 def test_cargo_check_hook_structure():

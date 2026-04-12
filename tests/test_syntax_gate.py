@@ -1,19 +1,31 @@
 import pytest
+import sys
+import os
+import json
+
+# Add project root to sys.path
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from ariadne.components import SyntaxGate
+from ariadne.profiles.base import DynamicProfile
 
 
-class MockRustProfile:
-    def get_language_ptr(self):
-        from tree_sitter import Language
+# Load Rust profile from JSON
+with open(
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "ariadne",
+        "profiles",
+        "rust.json",
+    ),
+    "r",
+) as f:
+    RUST_CONFIG = json.load(f)
 
-        return Language("tree-sitter-rust", "rust")
-
-
-profile = MockRustProfile()
+profile = DynamicProfile(RUST_CONFIG)
 
 
 def test_syntax_gate_valid_rust():
-    profile = RustProfile()
     gate = SyntaxGate(profile)
 
     # Valid Rust code
@@ -32,7 +44,6 @@ def test_syntax_gate_valid_rust():
 
 
 def test_syntax_gate_invalid_rust():
-    profile = RustProfile()
     gate = SyntaxGate(profile)
 
     # Invalid Rust code
