@@ -656,52 +656,6 @@ class MAPS_SURGEON(State):
                 return "MAPS_THINK", job
 
         job.fixed_code["edits"].append(edit)
-        return "SYNTAX_GATE", job
-
-
-class SYNTAX_GATE(State):
-    """
-    Validates generated code syntax before disk write.
-    """
-
-    def __init__(self, profile):
-        super().__init__("SYNTAX_GATE")
-        self.profile = profile
-
-    def tick(self, job: JobPayload, context: EngineContext) -> Tuple[str, JobPayload]:
-        logger.info("Validating syntax of proposed repair...")
-
-        if not job.fixed_code or not job.fixed_code.get("edits"):
-            return "ACTUATE", job
-
-        sensor = TreeSitterSensor(self.profile.get_language_ptr())
-
-        with open(job.fixed_code["filepath"], "rb") as f:
-            source = f.read()
-
-        # Normalize line endings in all edits
-        edits = []
-        for edit in job.fixed_code["edits"]:
-            edits.append(
-                {
-                    "start_byte": edit["start_byte"],
-                    "end_byte": edit["end_byte"],
-                    "new_code": edit["new_code"].replace("\r\n", "\n"),
-                }
-            )
-
-        # Syntax check the entire file with all surgical repairs applied
-        is_valid, error = sensor.validate_repair(source, edits)
-
-        if not is_valid:
-            logger.error(f"Syntax validation failed: {error}")
-            job.llm_feedback = f"The proposed repair introduced a syntax error: {error}. Please ensure the code is complete and follows the language grammar."
-            if job.fixed_code and job.fixed_code.get("edits"):
-                job.fixed_code["edits"].pop()
-            return "MAPS_THINK", job
-
-        logger.info("Syntax validation passed.")
-        job.llm_feedback = None
         return "ACTUATE", job
 
 

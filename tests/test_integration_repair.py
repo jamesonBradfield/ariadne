@@ -6,7 +6,6 @@ from ariadne.states import (
     MAPS_NAV,
     MAPS_THINK,
     MAPS_SURGEON,
-    SYNTAX_GATE,
     ACTUATE,
 )
 from ariadne.payloads import (
@@ -108,7 +107,6 @@ def test_rust_batch_processing(temp_rust_file):
     nav_state = MAPS_NAV(config_manager, profile)
     think_state = MAPS_THINK(config_manager, profile)
     surgeon_state = MAPS_SURGEON(config_manager, profile)
-    syntax_gate = SYNTAX_GATE(profile)
     actuate = ACTUATE()
 
     # Initial Job with plan
@@ -161,14 +159,10 @@ def test_rust_batch_processing(temp_rust_file):
             ),
         )
         status, job = surgeon_state.tick(job, context)
-        assert status == "SYNTAX_GATE"
+        assert status == "ACTUATE"
         assert len(job.fixed_code["edits"]) == 1
 
-        # 4. SYNTAX_GATE
-        status, job = syntax_gate.tick(job, context)
-        assert status == "ACTUATE"
-
-        # 5. ACTUATE
+        # 4. ACTUATE
         status, job = actuate.tick(job, context)
         assert status == "MAPS_NAV"
         assert len(job.tracked_nodes) == 0  # Node was edited and removed
@@ -266,7 +260,7 @@ def test_maps_batch_processing(temp_rust_file):
             MapsSurgeonResponse(reasoning="r", action="replace", code="let x = 42;"),
         )
         status, _ = surgeon_state.tick(job, context)
-        assert status == "SYNTAX_GATE"
+        assert status == "ACTUATE"
         assert len(job.fixed_code["edits"]) == 1
 
 

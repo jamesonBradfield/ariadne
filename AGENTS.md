@@ -39,7 +39,7 @@ Ariadne is a surgical code repair engine using Hierarchical Finite State Machine
 
 ## UNIQUE STYLES
 - **Test Contracts**: `test_contract.py`/`.rs` define repair targets
-- **State Machine**: 8-state HFSM (DISPATCH → THINKING → MAPS_NAV → MAPS_THINK → MAPS_SURGEON → POST_MORTEM)
+- **State Machine**: 7-state HFSM (DISPATCH → THINKING → MAPS_NAV → MAPS_THINK → MAPS_SURGEON → ACTUATE → POST_MORTEM)
 - **Component Tests**: Isolated unit tests for each sensor/hook
 - **Batch Processing**: Discovery mode finds multiple nodes before editing
 - **Amnesia Pattern**: Navigation state cleared but tracked nodes preserved
