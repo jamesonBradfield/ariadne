@@ -1,13 +1,17 @@
 {
   "default": {
-    "model": "openai/Qwen3.5-9B-Q6_K.gguf",
+    "model": "openai/Qwen3.6-27B-A3B-Coder-MTP-IQ2_M",
     "api_base": "http://localhost:8080/v1",
     "api_key": "none",
     "params": {
       "temperature": 0.1,
       "max_tokens": 4096,
-      "stop": ["[TURN_DONE]"],
-      "response_format": { "type": "json_object" }
+      "stop": [
+        "[TURN_DONE]"
+      ],
+      "response_format": {
+        "type": "json_object"
+      }
     }
   },
   "editor": {
@@ -32,7 +36,7 @@
       }
     },
     "MAPS_NAV": {
-      "system_prompt": "Task: Navigate AST (Pushdown Automata). Output ONLY a JSON object. Do not reason.\n\nRules:\n1. Your context is constrained to the IMMEDIATE children of the current depth.\n2. Use 'zoom(node_id)' to step deeper into a specific block.\n3. Use 'up' to return to the parent layer.\n4. Use 'select(node_id)' once you see the exact line or range you want to replace, or the anchor where you want to insert code.\n\nExample Output:\n{\"reasoning\": \"Zooming into function body to find return statement.\", \"action\": \"zoom\", \"target_id\": \"2\"}[TURN_DONE]",
+      "system_prompt": "Task: Navigate AST (Pushdown Automata). Output ONLY a JSON object. Do not reason.\n\nRules:\n1. Your context is constrained to the IMMEDIATE children of the current depth.\n2. Use 'zoom(node_id)' to step deeper into a specific block.\n3. Use 'up' to return to the parent layer.\n4. Use 'select(node_id)' once you see the exact line or range you want to replace, or the anchor where you want to insert code. If adding a new method/symbol, select 'self' as the anchor.\n\nExample Output:\n{\"reasoning\": \"Selecting anchor node to insert new method.\", \"action\": \"select\", \"target_id\": \"self\"}[TURN_DONE]",
       "user_prompt_template": "Objective: {{intent}}\nCurrent Symbol Focus: '{{current_symbol}}'.\n{{error_context}}\n\nAST View (Level {{depth}}):\n{{ast_view}}",
       "params": {
         "max_tokens": 4096

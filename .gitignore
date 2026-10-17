@@ -18,3 +18,4 @@ benchmark_results.json
 # Specialized Artifacts
 C
 RealRustTest/
+*.egg-info/

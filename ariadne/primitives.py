@@ -690,3 +690,102 @@ class BlockSplice(State):
         except Exception as e:
             logger.error(f"BlockSplice Error: {e}")
             return "ERROR", str(e)
+
+
+class QueryClef(State):
+    """Clef-flash aperture primitive: fast prefill/decision pass returning calibrated probabilities."""
+
+    def __init__(self, model: Optional[str] = None, api_base: Optional[str] = None, api_key: Optional[str] = None):
+        super().__init__("QUERY_CLEF")
+        import os
+        self.api_base = api_base or os.getenv("CLEF_API_BASE") or os.getenv("CLOUDFLARE_CLEF_URL") or "http://localhost:8080/v1"
+        default_model = "clef-flash" if "cloudflare" in self.api_base else "Bonsai-8B-Q1_0"
+        self.model = model or os.getenv("CLEF_MODEL") or default_model
+        self.api_key = api_key or os.getenv("CLOUDFLARE_API_TOKEN") or os.getenv("CLEF_API_KEY") or "none"
+
+    def tick(self, payload: Dict[str, Any], context: "EngineContext") -> Tuple[str, Any]:
+        import json
+        import urllib.request
+        import urllib.error
+
+        if not self.api_base:
+            return "ERROR", {"error": "no api_base configured"}
+
+        state = payload.get("state")
+        questions = payload.get("questions", {})
+
+        # If pointing to local OpenAI-compatible endpoint (e.g. CPU llama-swap model)
+        if "v1" in self.api_base or "localhost" in self.api_base or "127.0.0.1" in self.api_base:
+            endpoint = self.api_base.rstrip("/")
+            if not endpoint.endswith("/chat/completions"):
+                endpoint = f"{endpoint}/chat/completions"
+
+            state_str = state if isinstance(state, str) else json.dumps(state, indent=2)
+            sys_msg = (
+                "You are an AST surgical repair classifier. Output ONLY a JSON object:\n"
+                "{\n"
+                '  "isolated_node_sufficient": true | false,\n'
+                '  "surgical_action": "replace" | "insert_before" | "insert_after" | "delete",\n'
+                '  "confidence": float,\n'
+                '  "needed_slices": ["parent_skeleton", "file_imports", "lsp_hover", "call_sites", "test_contract_assertions", "last_attempted_diff"]\n'
+                "}"
+            )
+            body = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": sys_msg},
+                    {"role": "user", "content": state_str}
+                ],
+                "max_tokens": 80,
+                "temperature": 0.1,
+                "response_format": {"type": "json_object"}
+            }
+            try:
+                req = urllib.request.Request(
+                    endpoint,
+                    data=json.dumps(body).encode("utf-8"),
+                    headers={"Content-Type": "application/json"}
+                )
+                if self.api_key and self.api_key != "none":
+                    req.add_header("Authorization", f"Bearer {self.api_key}")
+
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    res = json.loads(resp.read().decode("utf-8"))
+                    raw = res["choices"][0]["message"]["content"]
+                    data = json.loads(raw)
+
+                    conf = float(data.get("confidence", 0.9))
+                    is_suff = bool(data.get("isolated_node_sufficient", True))
+                    prob_suff = conf if is_suff else (1.0 - conf)
+                    action = data.get("surgical_action", "replace")
+                    needed = data.get("needed_slices", [])
+
+                    decisions = {
+                        "isolated_node_sufficient": {"probability": prob_suff},
+                        "surgical_action": {"choice": action, "confidence": conf}
+                    }
+                    for key in questions:
+                        if key.startswith("need_"):
+                            slice_name = key[5:]
+                            decisions[key] = {"probability": 0.95 if slice_name in needed else 0.05}
+                    return "SUCCESS", decisions
+            except Exception as e:
+                return "ERROR", {"error": str(e)}
+
+        # Native Cloudflare Workers AI / Clef format
+        body = {"state": state, "questions": questions}
+        try:
+            req = urllib.request.Request(
+                self.api_base,
+                data=json.dumps(body).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            if self.api_key and self.api_key != "none":
+                req.add_header("Authorization", f"Bearer {self.api_key}")
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                raw = resp.read().decode("utf-8")
+            data = json.loads(raw)
+            decisions = data.get("decisions", data.get("result", data))
+            return "SUCCESS", decisions
+        except Exception as e:
+            return "ERROR", {"error": str(e)}
