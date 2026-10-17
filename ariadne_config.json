@@ -1,11 +1,11 @@
 {
   "default": {
-    "model": "openai/Qwen3.6-27B-A3B-Coder-MTP-IQ2_M",
+    "model": "mellum",
     "api_base": "http://localhost:8080/v1",
     "api_key": "none",
     "params": {
       "temperature": 0.1,
-      "max_tokens": 4096,
+      "max_tokens": 1024,
       "stop": [
         "[TURN_DONE]"
       ],
