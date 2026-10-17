@@ -678,13 +678,16 @@ class BlockSplice(State):
                 new_source_code = before + new_node_bytes + after
 
             logger.info(f"Writing {len(new_source_code)} bytes to {filepath}")
-            with open(filepath, "wb") as f:
+            dir_name = os.path.dirname(os.path.abspath(filepath))
+            tmp_path = os.path.join(dir_name, f".{os.path.basename(filepath)}.tmp.{os.getpid()}")
+            with open(tmp_path, "wb") as f:
                 f.write(new_source_code)
                 f.flush()
                 try:
                     os.fsync(f.fileno())
                 except Exception:
                     pass
+            os.replace(tmp_path, filepath)
 
             return "SUCCESS", filepath
         except Exception as e:
