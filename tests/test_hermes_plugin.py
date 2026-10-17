@@ -195,3 +195,34 @@ def test_select_context_empty_queue():
     # Amnesic system prompt injected
     assert "Objective:" in selected[1]["content"]
     assert "Active Queue: 1 of 0 tracked nodes" in selected[1]["content"]
+
+
+def test_checkpoint_save_and_restore():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.environ["HERMES_HOME"] = tmpdir
+        try:
+            # Session 1: track nodes
+            engine1 = AriadneAmnesiacEngine()
+            engine1.on_session_start("session_abc", intent="repair entity armor")
+            engine1.tracked_nodes = [
+                {"filepath": "src/lib.rs", "symbol": "foo", "start_byte": 10, "end_byte": 50, "node_type": "fn"}
+            ]
+            engine1._completed_edits = [{"filepath": "src/lib.rs", "action": "replace"}]
+            engine1.save_checkpoint()
+
+            # Session 2: simulate crash recovery / resume on same session_id
+            engine2 = AriadneAmnesiacEngine()
+            engine2.on_session_start("session_abc")
+            assert engine2.intent == "repair entity armor"
+            assert len(engine2.tracked_nodes) == 1
+            assert engine2.tracked_nodes[0]["symbol"] == "foo"
+            assert len(engine2._completed_edits) == 1
+
+            # Session reset cleans checkpoint
+            engine2.on_session_reset()
+            assert len(engine2.tracked_nodes) == 0
+            ckpt_path = engine2._checkpoint_path()
+            assert not os.path.exists(ckpt_path)
+        finally:
+            os.environ.pop("HERMES_HOME", None)
+
