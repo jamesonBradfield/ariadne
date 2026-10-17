@@ -51,3 +51,18 @@ def test_syntax_gate_invalid_rust():
 
     assert not is_valid
     assert "Syntax error" in error
+
+
+def test_syntax_gate_cleanliness_null_bytes():
+    gate = SyntaxGate(profile)
+    is_valid, error = gate.sensor.validate_repair(b"fn main() { \x00 }", [])
+    assert not is_valid
+    assert "null bytes or unclosed strings" in error
+
+
+def test_syntax_gate_cleanliness_unclosed_string():
+    gate = SyntaxGate(profile)
+    is_valid, error = gate.sensor.validate_repair(b'fn main() { let s = "unclosed; }', [])
+    assert not is_valid
+    assert "null bytes or unclosed strings" in error
+

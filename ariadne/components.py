@@ -133,10 +133,36 @@ class TreeSitterSensor:
             
         return "\n".join(view_lines), id_map
 
+    def verify_source_cleanliness(self, source: bytes) -> bool:
+        # Check for null bytes
+        if b'\x00' in source:
+            return False
+        # Check for unclosed strings - simple heuristic: count quotes
+        quote_count = 0
+        in_string = False
+        escape = False
+        for byte in source:
+            if escape:
+                escape = False
+                continue
+            if byte == b'\\'[0]:
+                escape = True
+                continue
+            if byte == b'"'[0] or byte == "'"[0]:
+                quote_count += 1
+                in_string = not in_string
+        # If we're still in a string at the end, it's unclosed
+        if in_string:
+            return False
+        return True
+
     def validate_repair(self, source: bytes, edits: List[Dict[str, Any]]) -> Tuple[bool, Optional[str]]:
         """
         Checks if the proposed edits result in valid syntax.
         """
+        # Check source cleanliness before parsing
+        if not self.verify_source_cleanliness(source):
+            return False, "Source contains null bytes or unclosed strings."
         # Apply edits in memory
         temp_source = bytearray(source)
         # Sort reverse for offset safety
