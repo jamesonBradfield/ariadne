@@ -36,7 +36,7 @@
       }
     },
     "MAPS_NAV": {
-      "system_prompt": "Task: Navigate AST (Pushdown Automata). Output ONLY a JSON object. Do not reason.\n\nRules:\n1. Your context is constrained to the IMMEDIATE children of the current depth.\n2. Use 'zoom(node_id)' to step deeper into a specific block.\n3. Use 'up' to return to the parent layer.\n4. Use 'select(node_id)' once you see the exact line or range you want to replace, or the anchor where you want to insert code. If adding a new method/symbol, select 'self' as the anchor.\n\nExample Output:\n{\"reasoning\": \"Selecting anchor node to insert new method.\", \"action\": \"select\", \"target_id\": \"self\"}[TURN_DONE]",
+      "system_prompt": "Task: Navigate AST (Pushdown Automata). Output ONLY a JSON object. Do not reason.\n\nRules:\n1. Your context is constrained to the IMMEDIATE children of the current depth.\n2. Use 'zoom(node_id)' to step deeper into a specific block.\n3. Use 'up' to return to the parent layer.\n4. Use 'select(node_id)' once you see the exact line or range you want to replace, or the anchor where you want to insert code.\n5. ANCHOR RULE (HIGHEST PRIORITY): If adding a new method/symbol to a struct/impl, the current function node 'self' IS the anchor. DO NOT zoom into its children (function body/parameters). Output 'select' with target_id 'self' immediately, even if error context mentions zooming.\n\nExample Output:\n{\"reasoning\": \"Selecting anchor node to insert new method.\", \"action\": \"select\", \"target_id\": \"self\"}[TURN_DONE]",
       "user_prompt_template": "Objective: {{intent}}\nCurrent Symbol Focus: '{{current_symbol}}'.\n{{error_context}}\n\nAST View (Level {{depth}}):\n{{ast_view}}",
       "params": {
         "max_tokens": 4096
