@@ -137,20 +137,24 @@ class TreeSitterSensor:
         # Check for null bytes
         if b'\x00' in source:
             return False
-        # Check for unclosed strings - simple heuristic: count quotes
-        quote_count = 0
+        # Check for unclosed strings - simple heuristic: count matching quotes
         in_string = False
         escape = False
-        for byte in source:
+        quote_byte = None
+        for b in source:
             if escape:
                 escape = False
                 continue
-            if byte == b'\\'[0]:
+            if b == ord('\\'):
                 escape = True
                 continue
-            if byte == b'"'[0] or byte == "'"[0]:
-                quote_count += 1
-                in_string = not in_string
+            if b in (ord('"'), ord("'")):
+                if quote_byte is None:
+                    quote_byte = b
+                    in_string = True
+                elif b == quote_byte:
+                    in_string = False
+                    quote_byte = None
         # If we're still in a string at the end, it's unclosed
         if in_string:
             return False

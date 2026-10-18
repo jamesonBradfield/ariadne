@@ -45,6 +45,10 @@ def run_benchmark(bench):
     ext = ".rs" if bench["profile"] == "rust" else ".py"
     test_file = f"test_contract{ext}"
     shutil.copy(bench["test_contract"], test_file)
+    # Ensure test file exists before proceeding
+    if not os.path.exists(test_file):
+        logger.error(f"Failed to copy test contract to {test_file}")
+        raise RuntimeError(f"Test contract not found at {test_file}")
     
     cmd = [
         sys.executable, "engine.py",
