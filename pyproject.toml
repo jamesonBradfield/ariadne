@@ -11,3 +11,9 @@ requires-python = ">=3.10"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["ariadne*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "/home/jamesontb/.hermes/hermes-agent"]
+
+

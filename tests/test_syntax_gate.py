@@ -66,3 +66,22 @@ def test_syntax_gate_cleanliness_unclosed_string():
     assert not is_valid
     assert "null bytes or unclosed strings" in error
 
+
+def test_syntax_gate_cleanliness_apostrophe_in_double_quotes():
+    gate = SyntaxGate(profile)
+    # Valid code with apostrophe inside double-quoted string
+    code = b'fn main() { let s = "it\'s a valid string"; }'
+    is_valid, error = gate.sensor.validate_repair(code, [])
+    assert is_valid
+    assert error is None
+
+
+def test_syntax_gate_cleanliness_double_quote_in_single_quotes():
+    gate = SyntaxGate(profile)
+    # Valid code with double quote inside single-quoted char literal
+    code = b'fn main() { let c = \'"\'; }'
+    is_valid, error = gate.sensor.validate_repair(code, [])
+    assert is_valid
+    assert error is None
+
+
