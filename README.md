@@ -126,4 +126,4 @@ pytest tests/ ──────────────────────
 See [ROADMAP.md](ROADMAP.md) for detailed test coverage and future plans.
 
 ## 📜 License
-GPL v3
+Apache License 2.0 (see LICENSE)
