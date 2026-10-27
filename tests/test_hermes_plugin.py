@@ -226,3 +226,63 @@ def test_checkpoint_save_and_restore():
         finally:
             os.environ.pop("HERMES_HOME", None)
 
+
+def test_turn_awareness_and_clef_verification():
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory() as tmpdir:
+        os.environ["HERMES_HOME"] = tmpdir
+        try:
+            engine = AriadneAmnesiacEngine()
+            engine.on_session_start("session_turns_isolated", intent="expand tree-sitter grammars")
+            assert engine.turn_count == 0
+
+            mock_eval = {
+                "objective_satisfied": True,
+                "completion_confidence": 0.94,
+                "is_stuck": False,
+                "recommended_action": "kanban_complete",
+            }
+
+            # Simulate 3 turns
+            engine.on_turn_complete([{"role": "user", "content": "step 1"}])
+            assert engine.turn_count == 1
+            engine.on_turn_complete([{"role": "user", "content": "step 2"}])
+            assert engine.turn_count == 2
+
+            # On turn 3 (warmup reached), mock QueryClef returning completion
+            with patch("ariadne.primitives.QueryClef.tick", return_value=("SUCCESS", mock_eval)):
+                engine.on_turn_complete([{"role": "user", "content": "step 3"}])
+                assert engine.turn_count == 3
+                assert engine.directive_nudge is not None
+                assert "OBJECTIVE VERIFIED COMPLETE" in engine.directive_nudge
+
+            # Verify directive nudge is prepended to amnesic view
+            view = engine._render_amnesic_view()
+            assert "[CRITICAL DIRECTIVE: OBJECTIVE VERIFIED COMPLETE]" in view
+            assert "kanban_complete" in view
+            assert f"Turn Progress: 3/{engine.estimated_turns}" in view
+        finally:
+            os.environ.pop("HERMES_HOME", None)
+
+
+def test_agentic_planning_escalation():
+    engine = AriadneAmnesiacEngine()
+    engine.turn_count = 30
+    engine.max_turn_budget = 30
+    engine.escalated_to_planning = True
+
+    messages = [
+        {"role": "system", "content": "system instruction"},
+        {"role": "user", "content": "step 1"},
+        {"role": "assistant", "content": "tool 1"},
+        {"role": "tool", "content": "output 1"},
+        {"role": "user", "content": "step 2"},
+    ]
+
+    selected = engine.select_context(messages)
+    # Escalated turn pauses compaction and injects planning frame
+    assert len(selected) == len(messages) + 1
+    assert "SURGEON ESCALATION: AGENTIC PLANNING TURN" in selected[1]["content"]
+    assert engine.escalated_to_planning is False
+
+

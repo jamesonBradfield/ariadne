@@ -76,7 +76,9 @@ def run_benchmarks():
         )
 
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
+            # 4096-token MAPS_* completions on a shared lane exceed the old
+            # 120s client timeout; the client must not time out before the lane.
+            with urllib.request.urlopen(req, timeout=300) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 msg = data["choices"][0]["message"]
                 content = msg.get("content", "").strip()

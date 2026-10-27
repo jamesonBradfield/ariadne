@@ -19,3 +19,8 @@ benchmark_results.json
 C
 RealRustTest/
 *.egg-info/
+
+# Monitor/anchor-loop artifacts
+anchor_benchmark_results.json
+logs/
+ariadne_temp_test

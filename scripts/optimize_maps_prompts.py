@@ -29,6 +29,10 @@ def optimize():
     default_cfg = config.get("default", {})
     local_base = default_cfg.get("api_base", "http://localhost:8080/v1")
     local_model = default_cfg.get("model", "openai/llama-cpp")
+    # LiteLLM rejects a bare custom-model name ("LLM Provider NOT provided").
+    # A custom OpenAI-compatible base needs the explicit openai/ prefix.
+    if "/" not in local_model:
+        local_model = "openai/" + local_model
 
     # 2. Setup Judge (Teacher) engine - OpenRouter if available
     or_key = os.getenv("OPENROUTER_API_KEY")

@@ -6,7 +6,10 @@ import asyncio
 from typing import Any, Dict, List, Optional, Tuple
 
 import tree_sitter
-from ast_grep_py import SgRoot
+try:
+    from ast_grep_py import SgRoot
+except ImportError:
+    SgRoot = None
 
 from .core import State
 
@@ -609,11 +612,8 @@ class ASTSplice(State):
 
 class BlockSplice(State):
     """
-    Surgical string replacement within a specific AST node's byte range.
-    Input Payload: Dict with 'filepath', 'edits' (list of dicts).
-    Edits can have:
-    - 'new_code': Direct replacement of the entire node range.
-    - 'search_text' & 'replace_text': Legacy search-and-replace within the node range.
+    Surgical AST block splicing primitive.
+    Input Payload: Dict with 'filepath' and 'edits' (list of dicts with 'start_byte', 'end_byte', 'new_code').
     Returns: Tuple[str, str] (status, filepath)
     """
 
@@ -702,44 +702,143 @@ class QueryClef(State):
         super().__init__("QUERY_CLEF")
         import os
         self.api_base = api_base or os.getenv("CLEF_API_BASE") or os.getenv("CLOUDFLARE_CLEF_URL") or "http://localhost:8080/v1"
-        default_model = "clef-flash" if "cloudflare" in self.api_base else "Bonsai-8B-Q1_0"
+        default_model = "clef-flash" if "cloudflare" in self.api_base else "Spark-RTN"
         self.model = model or os.getenv("CLEF_MODEL") or default_model
         self.api_key = api_key or os.getenv("CLOUDFLARE_API_TOKEN") or os.getenv("CLEF_API_KEY") or "none"
 
-    def tick(self, payload: Dict[str, Any], context: "EngineContext") -> Tuple[str, Any]:
+    def deterministic_classify(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Endpoint-free decision pass used when no api_base is configured.
+        Returns the SAME intermediate result shape the model calls produce, so
+        tick()'s per-mode post-processing consumes it unchanged. Deliberately
+        conservative: default is in_progress / continue_splice / mid-range
+        turn estimate; keyword signals in the state nudge toward done/stuck."""
+        import json
+        mode = payload.get("mode", "aperture")
+        state = payload.get("state")
+        low = (state if isinstance(state, str) else json.dumps(state or "")).lower()
+        done = any(k in low for k in ("completed", "task done", "success", "all tests pass"))
+        stuck = any(k in low for k in ("error", "failed", "stuck", "blocked", "cannot proceed"))
+        if mode == "verify_objective":
+            return {
+                "objective_status": {
+                    "completed": 0.9 if done else 0.05,
+                    "in_progress": 0.9 if not (done or stuck) else 0.05,
+                    "blocked_or_stuck": 0.9 if (stuck and not done) else 0.05,
+                },
+                "recommended_action": {
+                    "continue_splice": 0.9 if not (done or stuck) else 0.05,
+                    "kanban_complete": 0.9 if done else 0.05,
+                    "escalate_to_planner": 0.9 if (stuck and not done) else 0.05,
+                },
+                "remaining_turns_bucket": {
+                    "0": 0.9 if done else 0.02,
+                    "1-5": 0.03,
+                    "6-15": 0.9 if not done else 0.01,
+                    "15+": 0.07,
+                },
+            }
+        if mode == "estimate_turns":
+            return {
+                "remaining_turns_bucket": {"1-5": 0.03, "6-15": 0.9, "15-30": 0.05, "30+": 0.02},
+                "task_complexity": {"low": 0.05, "medium": 0.9, "high": 0.05},
+            }
+        # Legacy aperture shape
+        return {
+            "isolated_node_sufficient": False,
+            "surgical_action": "replace",
+            "confidence": 0.5,
+            "needed_slices": ["parent_skeleton", "file_imports", "call_sites"],
+        }
+
+    def tick(self, payload: Dict[str, Any], context: "EngineContext" = None) -> Tuple[str, Any]:
         import json
         import urllib.request
         import urllib.error
 
-        if not self.api_base:
-            return "ERROR", {"error": "no api_base configured"}
+        # NOTE: the no-endpoint fallback is NOT an early ERROR return here — it
+        # runs deterministic_classify in the request branch below so the normal
+        # per-mode post-processing still consumes the heuristic decisions.
 
+        mode = payload.get("mode", "aperture")
         state = payload.get("state")
-        questions = payload.get("questions", {})
+        questions = payload.get("questions")
 
-        # If pointing to local OpenAI-compatible endpoint (e.g. CPU llama-swap model)
-        if "v1" in self.api_base or "localhost" in self.api_base or "127.0.0.1" in self.api_base:
+        if not questions:
+            if mode == "verify_objective":
+                questions = {
+                    "objective_status": {
+                        "type": "choice",
+                        "options": ["in_progress", "completed", "blocked_or_stuck"]
+                    },
+                    "recommended_action": {
+                        "type": "choice",
+                        "options": ["continue_splice", "kanban_complete", "escalate_to_planner"]
+                    },
+                    "remaining_turns_bucket": {
+                        "type": "choice",
+                        "options": ["0", "1-5", "6-15", "15+"]
+                    }
+                }
+            elif mode == "estimate_turns":
+                questions = {
+                    "remaining_turns_bucket": {
+                        "type": "choice",
+                        "options": ["1-5", "6-15", "15-30", "30+"]
+                    },
+                    "task_complexity": {
+                        "type": "choice",
+                        "options": ["low", "medium", "high"]
+                    }
+                }
+            else:
+                questions = payload.get("questions", {})
+
+        # If pointing to local OpenAI-compatible endpoint (e.g. llama-swap port 8080)
+        is_openai_compat = ("8080" in self.api_base or "chat/completions" in self.api_base) and not ("8093" in self.api_base or "clef" in self.api_base.lower())
+        if not self.api_base:
+            # Heuristic decision pass — same shape the model branches produce.
+            result = self.deterministic_classify(payload)
+        elif is_openai_compat:
             endpoint = self.api_base.rstrip("/")
             if not endpoint.endswith("/chat/completions"):
                 endpoint = f"{endpoint}/chat/completions"
 
             state_str = state if isinstance(state, str) else json.dumps(state, indent=2)
-            sys_msg = (
-                "You are an AST surgical repair classifier. Output ONLY a JSON object:\n"
-                "{\n"
-                '  "isolated_node_sufficient": true | false,\n'
-                '  "surgical_action": "replace" | "insert_before" | "insert_after" | "delete",\n'
-                '  "confidence": float,\n'
-                '  "needed_slices": ["parent_skeleton", "file_imports", "lsp_hover", "call_sites", "test_contract_assertions", "last_attempted_diff"]\n'
-                "}"
-            )
+            if mode == "verify_objective":
+                sys_msg = (
+                    "You are a task verifier. Output ONLY JSON with choice probabilities:\n"
+                    "{\n"
+                    '  "objective_status": {"in_progress": float, "completed": float, "blocked_or_stuck": float},\n'
+                    '  "recommended_action": {"continue_splice": float, "kanban_complete": float, "escalate_to_planner": float},\n'
+                    '  "remaining_turns_bucket": {"0": float, "1-5": float, "6-15": float, "15+": float}\n'
+                    "}"
+                )
+            elif mode == "estimate_turns":
+                sys_msg = (
+                    "You are a task complexity estimator. Output ONLY JSON:\n"
+                    "{\n"
+                    '  "remaining_turns_bucket": {"1-5": float, "6-15": float, "15-30": float, "30+": float},\n'
+                    '  "task_complexity": {"low": float, "medium": float, "high": float}\n'
+                    "}"
+                )
+            else:
+                sys_msg = (
+                    "You are an AST surgical repair classifier. Output ONLY a JSON object:\n"
+                    "{\n"
+                    '  "isolated_node_sufficient": true | false,\n'
+                    '  "surgical_action": "replace" | "insert_before" | "insert_after" | "delete",\n'
+                    '  "confidence": float,\n'
+                    '  "needed_slices": ["parent_skeleton", "file_imports", "lsp_hover", "call_sites", "test_contract_assertions", "last_attempted_diff"]\n'
+                    "}"
+                )
+
             body = {
                 "model": self.model,
                 "messages": [
                     {"role": "system", "content": sys_msg},
                     {"role": "user", "content": state_str}
                 ],
-                "max_tokens": 80,
+                "max_tokens": 120,
                 "temperature": 0.1,
                 "response_format": {"type": "json_object"}
             }
@@ -755,40 +854,75 @@ class QueryClef(State):
                 with urllib.request.urlopen(req, timeout=10) as resp:
                     res = json.loads(resp.read().decode("utf-8"))
                     raw = res["choices"][0]["message"]["content"]
-                    data = json.loads(raw)
-
-                    conf = float(data.get("confidence", 0.9))
-                    is_suff = bool(data.get("isolated_node_sufficient", True))
-                    prob_suff = conf if is_suff else (1.0 - conf)
-                    action = data.get("surgical_action", "replace")
-                    needed = data.get("needed_slices", [])
-
-                    decisions = {
-                        "isolated_node_sufficient": {"probability": prob_suff},
-                        "surgical_action": {"choice": action, "confidence": conf}
-                    }
-                    for key in questions:
-                        if key.startswith("need_"):
-                            slice_name = key[5:]
-                            decisions[key] = {"probability": 0.95 if slice_name in needed else 0.05}
-                    return "SUCCESS", decisions
+                    result = json.loads(raw)
+            except Exception as e:
+                return "ERROR", {"error": str(e)}
+        else:
+            # Native Cloudflare Workers AI / Clef NAR format
+            body = {"state": state, "questions": questions}
+            try:
+                req = urllib.request.Request(
+                    self.api_base,
+                    data=json.dumps(body).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                )
+                if self.api_key and self.api_key != "none":
+                    req.add_header("Authorization", f"Bearer {self.api_key}")
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    raw = resp.read().decode("utf-8")
+                data = json.loads(raw)
+                result = data.get("result", data.get("decisions", data))
             except Exception as e:
                 return "ERROR", {"error": str(e)}
 
-        # Native Cloudflare Workers AI / Clef format
-        body = {"state": state, "questions": questions}
-        try:
-            req = urllib.request.Request(
-                self.api_base,
-                data=json.dumps(body).encode("utf-8"),
-                headers={"Content-Type": "application/json"},
-            )
-            if self.api_key and self.api_key != "none":
-                req.add_header("Authorization", f"Bearer {self.api_key}")
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                raw = resp.read().decode("utf-8")
-            data = json.loads(raw)
-            decisions = data.get("decisions", data.get("result", data))
-            return "SUCCESS", decisions
-        except Exception as e:
-            return "ERROR", {"error": str(e)}
+        if mode == "verify_objective":
+            obj_probs = result.get("objective_status", {})
+            action_probs = result.get("recommended_action", {})
+            remaining_probs = result.get("remaining_turns_bucket", {})
+
+            completed_prob = float(obj_probs.get("completed", 0.0))
+            stuck_prob = float(obj_probs.get("blocked_or_stuck", 0.0))
+            complete_action_prob = float(action_probs.get("kanban_complete", 0.0))
+            escalate_prob = float(action_probs.get("escalate_to_planner", 0.0))
+
+            is_completed = (completed_prob >= 0.80 or complete_action_prob >= 0.80)
+            is_stuck = (stuck_prob >= 0.75 or escalate_prob >= 0.75)
+            rec_action = max(action_probs, key=action_probs.get) if action_probs else ("kanban_complete" if is_completed else "continue_splice")
+            est_rem = max(remaining_probs, key=remaining_probs.get) if remaining_probs else "0"
+
+            return "SUCCESS", {
+                "objective_satisfied": is_completed,
+                "completion_confidence": max(completed_prob, complete_action_prob),
+                "is_stuck": is_stuck,
+                "recommended_action": rec_action,
+                "remaining_turns_bucket": est_rem,
+                "raw_decisions": result
+            }
+        elif mode == "estimate_turns":
+            rem_probs = result.get("remaining_turns_bucket", {})
+            best_bucket = max(rem_probs, key=rem_probs.get) if rem_probs else "6-15"
+            bucket_map = {"1-5": 5, "6-15": 15, "15-30": 25, "30+": 35}
+            est = bucket_map.get(best_bucket, 15)
+            return "SUCCESS", {
+                "estimated_turns": est,
+                "max_budget": est * 2,
+                "bucket": best_bucket,
+                "raw_decisions": result
+            }
+
+        # Legacy aperture decisions
+        conf = float(result.get("confidence", 0.9)) if isinstance(result, dict) else 0.9
+        is_suff = bool(result.get("isolated_node_sufficient", True)) if isinstance(result, dict) else True
+        prob_suff = conf if is_suff else (1.0 - conf)
+        action = result.get("surgical_action", "replace") if isinstance(result, dict) else "replace"
+        needed = result.get("needed_slices", []) if isinstance(result, dict) else []
+
+        decisions = {
+            "isolated_node_sufficient": {"probability": prob_suff},
+            "surgical_action": {"choice": action, "confidence": conf}
+        }
+        for key in questions:
+            if key.startswith("need_"):
+                slice_name = key[5:]
+                decisions[key] = {"probability": 0.95 if slice_name in needed else 0.05}
+        return "SUCCESS", decisions

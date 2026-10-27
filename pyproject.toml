@@ -7,6 +7,10 @@ name = "ariadne"
 version = "8.2.0"
 description = "Surgical Code Repair Engine"
 requires-python = ">=3.10"
+dependencies = [
+    "litellm>=1.106.4",
+    "textgrad>=0.1.8",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
